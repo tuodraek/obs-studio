@@ -20,6 +20,7 @@ class MainHook : XposedModule() {
         // The framework classes we hook are shared by the whole process, so
         // install exactly once even if several packages load into it.
         if (!installed.compareAndSet(false, true)) return
+        DiagHook(this).install()
         FlagHook(this).install(param)
         ZoomHook(this).install()
     }
