@@ -34,6 +34,11 @@ class FlagHook(private val module: MainHook) {
             "camera.boba_jelly_eligible",
         )
 
+        /** Numeric flags to override (value type and Optional wrapping are preserved). */
+        val FORCE_NUMBER = mapOf(
+            "camera.manual_max_tele_zoom" to 100.0,
+        )
+
         private val INTERESTING = Regex(
             "zoom|centaur|boba|pro_res|prores|diffusion|tpu|genai|gen_ai|aicore|" +
                 "model_download|download|upscal|super_res|superres|crop|" +
@@ -67,7 +72,7 @@ class FlagHook(private val module: MainHook) {
                 }
                 chain.proceed()
             }
-            module.logMessage(Log.INFO, TAG, "Flag hook installed; forcing: $FORCE_TRUE")
+            module.logMessage(Log.INFO, TAG, "Flag hook installed; forcing: $FORCE_TRUE, $FORCE_NUMBER")
         } catch (t: Throwable) {
             module.logMessage(Log.ERROR, TAG, "Flag hook failed: ${Log.getStackTraceString(t)}")
         }
@@ -124,12 +129,33 @@ class FlagHook(private val module: MainHook) {
             module.hookMethod(method).intercept { chain ->
                 val original = chain.proceed()
                 val name = flagName(chain.getArg(0))
+                val target = name?.let { FORCE_NUMBER[it] }
+                if (target != null) {
+                    val replaced = coerce(original, target)
+                    logOnce(name, "Flag $name: original=${describe(original)} -> forced ${describe(replaced)}")
+                    return@intercept replaced
+                }
                 if (name != null && INTERESTING.containsMatchIn(name)) {
                     logOnce(name, "Flag $name = ${describe(original)} (${method.returnType.simpleName})")
                 }
                 original
             }
         } catch (_: Throwable) {
+        }
+    }
+
+    /** Returns [target] in the same shape as [original] (Float/Double/Int/Long, optionally in an Optional). */
+    private fun coerce(original: Any?, target: Double): Any? {
+        fun inner(v: Any?): Any = when (v) {
+            is Double -> target
+            is Int -> target.toInt()
+            is Long -> target.toLong()
+            else -> target.toFloat()
+        }
+        return when (original) {
+            is java.util.Optional<*> -> java.util.Optional.of(inner(original.orElse(null)))
+            is Number -> inner(original)
+            else -> original
         }
     }
 
