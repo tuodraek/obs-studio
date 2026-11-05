@@ -36,7 +36,8 @@ class FlagHook(private val module: MainHook) {
 
         private val INTERESTING = Regex(
             "zoom|centaur|boba|pro_res|prores|diffusion|tpu|genai|gen_ai|aicore|" +
-                "model_download|download|upscal|super_res|superres|crop",
+                "model_download|download|upscal|super_res|superres|crop|" +
+                "mdd|manifest|file_group|filegroup|url|http",
             RegexOption.IGNORE_CASE
         )
     }
@@ -89,6 +90,10 @@ class FlagHook(private val module: MainHook) {
                 java.lang.Integer.TYPE, java.lang.Integer::class.java,
                 java.lang.Long.TYPE, java.lang.Long::class.java,
                 java.lang.Double.TYPE, java.lang.Double::class.java -> hookNumberLogOnly(method)
+                java.lang.Void.TYPE -> {}
+                // Strings, byte[] and proto-valued flags (download manifests,
+                // URLs, file group configs).
+                else -> hookNumberLogOnly(method)
             }
         }
     }
@@ -120,12 +125,23 @@ class FlagHook(private val module: MainHook) {
                 val original = chain.proceed()
                 val name = flagName(chain.getArg(0))
                 if (name != null && INTERESTING.containsMatchIn(name)) {
-                    logOnce(name, "Flag $name = $original (${method.returnType.simpleName})")
+                    logOnce(name, "Flag $name = ${describe(original)} (${method.returnType.simpleName})")
                 }
                 original
             }
         } catch (_: Throwable) {
         }
+    }
+
+    private fun describe(v: Any?): String = when (v) {
+        null -> "null"
+        is ByteArray -> {
+            // Show readable fragments (URLs, file names) inside serialized protos.
+            val text = String(v, Charsets.ISO_8859_1)
+            val runs = Regex("[\\x20-\\x7e]{6,}").findAll(text).map { it.value }.take(20).toList()
+            "byte[${v.size}] strings=$runs"
+        }
+        else -> v.toString().let { if (it.length > 400) it.take(400) + "..." else it }
     }
 
     private fun logOnce(name: String, msg: String) {
