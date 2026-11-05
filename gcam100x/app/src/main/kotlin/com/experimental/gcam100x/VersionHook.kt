@@ -37,7 +37,6 @@ class VersionHook(private val module: MainHook) {
     companion object {
         private const val TAG = "GCam100x"
         private const val CAMERA_APP = "com.google.android.apps.camera.app.CameraApp"
-        private const val CHECK_CLASS = "adoc"
         private const val TOAST_CLASS = "isl"
 
         /** Set once the version check has fired (message shown or bypassed). */
@@ -53,10 +52,11 @@ class VersionHook(private val module: MainHook) {
     fun install(param: XposedModuleInterface.PackageLoadedParam) {
         val loader = param.defaultClassLoader
         step("signature dump") { dumpClasses(loader) }
-        step("adoc hook") { hookCheckClass(loader) }
+        step("version check spoof") { hookCheckClass(loader) }
         step("hasSystemFeature") { hookSystemFeatures() }
         step("SystemProperties") { hookSystemProperties() }
         step("exit guards") { hookExits() }
+        step("crash logger") { hookCrashes() }
         info("Version hooks installed")
     }
 
@@ -77,6 +77,7 @@ class VersionHook(private val module: MainHook) {
             module.hookMethod(m).intercept { chain ->
                 val result = chain.proceed()
                 val name = chain.getArg(0) as? String
+                if (inCheck.get() == true) info("Feature query during version check: $name = $result")
                 if (name != null && loggedFeatures.add(name)) {
                     info("Feature query: $name = $result")
                 }
@@ -91,8 +92,13 @@ class VersionHook(private val module: MainHook) {
             if (!Modifier.isStatic(m.modifiers) || !m.name.startsWith("get")) continue
             if (m.parameterTypes.firstOrNull() != String::class.java) continue
             module.hookMethod(m).intercept { chain ->
-                val result = chain.proceed()
                 val key = chain.getArg(0) as? String
+                if (inCheck.get() == true && key != null) {
+                    val fake = spoofProps[key]
+                    info("Property read during version check: $key${if (fake != null) " -> spoofed $fake" else ""}")
+                    if (fake != null && m.returnType == String::class.java) return@intercept fake
+                }
+                val result = chain.proceed()
                 if (key != null && loggedProps.add(key)) {
                     info("Property read: $key = $result")
                 }
@@ -104,7 +110,7 @@ class VersionHook(private val module: MainHook) {
     // --- 2. Signatures ---------------------------------------------------------
 
     private fun dumpClasses(loader: ClassLoader) {
-        for (name in listOf(CAMERA_APP, CHECK_CLASS, TOAST_CLASS)) {
+        for (name in listOf(TOAST_CLASS)) {
             val c = try {
                 loader.loadClass(name)
             } catch (_: Throwable) {
@@ -118,38 +124,76 @@ class VersionHook(private val module: MainHook) {
         }
     }
 
-    // --- 3. Bypass ------------------------------------------------------------
+    // --- 3. Bypass: run the check (isl.a) as a Pixel 10 Pro XL ---------------
+
+    /** Pixel 10 Pro XL identity, applied only while isl.a() runs. */
+    private val spoofBuild = mapOf(
+        "MODEL" to "Pixel 10 Pro XL",
+        "DEVICE" to "mustang",
+        "PRODUCT" to "mustang",
+        "BOARD" to "mustang",
+        "HARDWARE" to "mustang",
+        "SOC_MODEL" to "Tensor G5",
+    )
+    private val spoofProps = mapOf(
+        "ro.product.model" to "Pixel 10 Pro XL",
+        "ro.product.vendor.model" to "Pixel 10 Pro XL",
+        "ro.product.device" to "mustang",
+        "ro.product.vendor.device" to "mustang",
+        "ro.product.name" to "mustang",
+        "ro.product.vendor.name" to "mustang",
+        "ro.product.board" to "mustang",
+        "ro.hardware" to "mustang",
+        "ro.boot.hardware" to "mustang",
+        "ro.soc.model" to "Tensor G5",
+        "ro.board.platform" to "laguna",
+        "ro.boot.hardware.platform" to "laguna",
+    )
+    private val inCheck = ThreadLocal.withInitial { false }
 
     private fun hookCheckClass(loader: ClassLoader) {
         val c = try {
-            loader.loadClass(CHECK_CLASS)
+            loader.loadClass(TOAST_CLASS)
         } catch (_: Throwable) {
             return
         }
-        for (m in c.declaredMethods) {
-            if (Modifier.isAbstract(m.modifiers)) continue
-            hookCheckMethod(m)
+        if (c.declaredFields.none { it.type.name == CAMERA_APP }) {
+            info("$TOAST_CLASS is not the version check in this build; not hooking")
+            return
+        }
+        val m = c.getDeclaredMethod("a")
+        module.hookMethod(m).intercept { chain ->
+            val saved = setBuild(spoofBuild)
+            info("Version check: running $TOAST_CLASS.a() as Pixel 10 Pro XL (real: $saved)")
+            inCheck.set(true)
+            try {
+                val r = chain.proceed()
+                info("Version check returned ${describe(r)} (message shown=$tripped)")
+                r
+            } catch (t: Throwable) {
+                info("Version check threw ${Log.getStackTraceString(t)}")
+                throw t
+            } finally {
+                inCheck.set(false)
+                setBuild(saved)
+            }
         }
     }
 
-    private fun hookCheckMethod(m: Method) {
-        module.hookMethod(m).intercept { chain ->
-            val fromCameraApp = Throwable().stackTrace.take(12).any { it.className == CAMERA_APP }
-            val args = (0 until m.parameterTypes.size).joinToString { describe(chain.getArg(it)) }
-            if (fromCameraApp && m.returnType == Void.TYPE) {
-                tripped = true
-                info("Version check: skipped $m from CameraApp (args: $args)")
-                return@intercept null
-            }
+    /** Sets android.os.Build fields; returns their previous values. */
+    private fun setBuild(values: Map<String, String>): Map<String, String> {
+        val old = HashMap<String, String>()
+        for ((name, v) in values) {
             try {
-                val r = chain.proceed()
-                if (fromCameraApp) info("Version check: $m($args) returned ${describe(r)}")
-                r
+                val f = android.os.Build::class.java.getDeclaredField(name)
+                f.isAccessible = true
+                old[name] = f.get(null) as? String ?: ""
+                f.set(null, v)
             } catch (t: Throwable) {
-                info("Version check: $m($args) threw ${Log.getStackTraceString(t)}")
-                throw t
+                module.logMessage(Log.WARN, TAG, "Cannot set Build.$name: $t")
             }
         }
+        return old
     }
 
     private fun describe(v: Any?): String =
@@ -175,12 +219,23 @@ class VersionHook(private val module: MainHook) {
         }
     }
 
-    /** Always logs the caller; blocks only once the version check has fired. */
+    /** Blocks only exits made by the version check itself; logs every attempt. */
     private fun blockExit(what: String): Boolean {
-        val frames = Throwable().stackTrace
+        val all = Throwable().stackTrace
+        val fromCheck = all.any { it.className == TOAST_CLASS }
+        val frames = all
             .filterNot { it.className.startsWith("com.experimental.gcam100x") || it.className.startsWith("dalvik.") }
             .take(20)
-        info("$what called (blocked=$tripped) from:\n    " + frames.joinToString("\n    "))
-        return tripped
+        info("$what called (blocked=$fromCheck) from:\n    " + frames.joinToString("\n    "))
+        return fromCheck
+    }
+
+    private fun hookCrashes() {
+        val m = Thread::class.java.getDeclaredMethod("dispatchUncaughtException", Throwable::class.java)
+        module.hookMethod(m).intercept { chain ->
+            val t = chain.getArg(0) as? Throwable
+            info("CRASH on thread ${(chain.thisObject as? Thread)?.name}: ${Log.getStackTraceString(t)}")
+            chain.proceed()
+        }
     }
 }
