@@ -47,10 +47,20 @@ class FlagHook(private val module: MainHook) {
         )
     }
 
+    /**
+     * String flags to override, filled in at install time from the Pro Zoom
+     * manifest bundled in Google Camera's own APK (see [findCentaurManifest]).
+     */
+    private val forceString: MutableMap<String, String> = HashMap()
+
     private val processedClasses: MutableSet<String> = Collections.synchronizedSet(HashSet())
     private val loggedFlags: MutableSet<String> = Collections.synchronizedSet(HashSet())
 
     fun install(param: XposedModuleInterface.PackageLoadedParam) {
+        findCentaurManifest(param)?.let { (asset, variant) ->
+            forceString["camera.centaur_manifest_config_file_name"] = "asset:/$asset"
+            forceString["camera.centaur_variant"] = variant
+        }
         try {
             val loader = param.defaultClassLoader
             val beginSection = Class.forName("android.os.Trace")
@@ -72,10 +82,43 @@ class FlagHook(private val module: MainHook) {
                 }
                 chain.proceed()
             }
-            module.logMessage(Log.INFO, TAG, "Flag hook installed; forcing: $FORCE_TRUE, $FORCE_NUMBER")
+            module.logMessage(Log.INFO, TAG, "Flag hook installed; forcing: $FORCE_TRUE, $FORCE_NUMBER, $forceString")
         } catch (t: Throwable) {
             module.logMessage(Log.ERROR, TAG, "Flag hook failed: ${Log.getStackTraceString(t)}")
         }
+    }
+
+    /**
+     * Pixel 10 Pro builds set camera.centaur_manifest_config_file_name to
+     * "asset:/centaur_<gen>_manifest_config_<variant>.pb" (a manifest bundled
+     * in the APK) and camera.centaur_variant to "centaur_<gen>". Find that
+     * asset in the installed Google Camera APK(s) and return (asset, variant).
+     */
+    private fun findCentaurManifest(param: XposedModuleInterface.PackageLoadedParam): Pair<String, String>? {
+        val info = param.applicationInfo
+        val apks = listOfNotNull(info.sourceDir) + (info.splitSourceDirs?.toList() ?: emptyList())
+        val pattern = Regex("^assets/((centaur_[a-z0-9]+)_manifest_config[^/]*\\.pb)$")
+        val found = ArrayList<Pair<String, String>>()
+        for (apk in apks) {
+            try {
+                java.util.zip.ZipFile(apk).use { zip ->
+                    for (e in zip.entries()) {
+                        if (!e.name.contains("centaur", ignoreCase = true)) continue
+                        module.logMessage(Log.INFO, TAG, "APK asset: ${e.name} (${e.size} bytes) in ${apk.substringAfterLast('/')}")
+                        pattern.find(e.name)?.let { m -> found += m.groupValues[1] to m.groupValues[2] }
+                    }
+                }
+            } catch (t: Throwable) {
+                module.logMessage(Log.WARN, TAG, "Could not scan $apk: $t")
+            }
+        }
+        // Prefer the default variant, then the newest generation.
+        val pick = found.sortedWith(
+            compareByDescending<Pair<String, String>> { it.first.contains("default_variant") }
+                .thenByDescending { it.second }
+        ).firstOrNull()
+        module.logMessage(Log.INFO, TAG, "Centaur manifests found: $found -> using $pick")
+        return pick
     }
 
     private fun isConfigClass(clazz: Class<*>): Boolean {
@@ -129,6 +172,11 @@ class FlagHook(private val module: MainHook) {
             module.hookMethod(method).intercept { chain ->
                 val original = chain.proceed()
                 val name = flagName(chain.getArg(0))
+                val forcedString = name?.let { forceString[it] }
+                if (forcedString != null && (original == null || original is String)) {
+                    logOnce(name, "Flag $name: original=${describe(original)} -> forced $forcedString")
+                    return@intercept forcedString
+                }
                 val target = name?.let { FORCE_NUMBER[it] }
                 if (target != null) {
                     val replaced = coerce(original, target)
@@ -152,11 +200,20 @@ class FlagHook(private val module: MainHook) {
             is Long -> target.toLong()
             else -> target.toFloat()
         }
-        return when (original) {
-            is java.util.Optional<*> -> java.util.Optional.of(inner(original.orElse(null)))
-            is Number -> inner(original)
-            else -> original
+        if (original is Number) return inner(original)
+        if (original != null && original.javaClass.simpleName == "Optional") {
+            // java.util.Optional or the desugared j$.util.Optional the app uses.
+            return try {
+                val c = original.javaClass
+                val present = c.getMethod("isPresent").invoke(original) as Boolean
+                val v = if (present) c.getMethod("get").invoke(original) else null
+                c.getMethod("of", Any::class.java).invoke(null, inner(v))
+            } catch (t: Throwable) {
+                module.logMessage(Log.ERROR, TAG, "Optional override failed: $t")
+                original
+            }
         }
+        return original
     }
 
     private fun describe(v: Any?): String = when (v) {
