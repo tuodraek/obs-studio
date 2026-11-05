@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">GCam 100x Experimental</string>
+    <string name="module_description">Experimental Google Camera zoom extension</string>
+</resources>
