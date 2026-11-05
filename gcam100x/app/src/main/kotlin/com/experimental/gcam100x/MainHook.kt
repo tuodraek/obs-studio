@@ -20,18 +20,15 @@ class MainHook : XposedModule() {
         // The framework classes we hook are shared by the whole process, so
         // install exactly once even if several packages load into it.
         if (!installed.compareAndSet(false, true)) return
+        FlagHook(this).install(param)
         ZoomHook(this).install()
     }
 
     fun hookMethod(method: Method) = hook(method)
 
-    /**
-     * Writes to the LSPosed module log *and* directly to logcat, so
-     * `adb logcat | findstr GCam100x` always shows our output.
-     */
+    /** LSPosed/Vector mirrors module logs to logcat under the same tag. */
     fun logMessage(priority: Int, tag: String, msg: String) {
         runCatching { log(priority, tag, msg) }
-        runCatching { Log.println(priority, tag, msg) }
     }
 
     companion object {

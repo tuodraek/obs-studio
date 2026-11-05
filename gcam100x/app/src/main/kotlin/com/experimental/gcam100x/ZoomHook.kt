@@ -113,20 +113,24 @@ class ZoomHook(private val module: MainHook) {
      * the next thing to hook if the slider still stops at 30x.
      */
     private fun logCallerOnce(keyName: String) {
-        val frames = Throwable().stackTrace
+        val all = Throwable().stackTrace
+        // Skip everything up to the hooked CameraCharacteristics.get frame
+        // (the hook framework's own frames have obfuscated names, so they
+        // can't be filtered by package).
+        val hookedGet = all.indexOfFirst {
+            it.methodName == "get" &&
+                (it.className.startsWith("Vector_") || it.className.startsWith("LSPHooker") ||
+                    it.className == "android.hardware.camera2.CameraCharacteristics")
+        }
+        val frames = all.drop(hookedGet + 1)
             .filterNot {
                 it.className.startsWith("android.") ||
                     it.className.startsWith("java.") ||
                     it.className.startsWith("kotlin.") ||
                     it.className.startsWith("com.experimental.gcam100x") ||
-                    it.className.startsWith("io.github.libxposed") ||
-                    it.className.startsWith("org.lsposed") ||
-                    it.className.startsWith("org.matrix") ||
-                    it.className.startsWith("de.robv") ||
-                    it.className.startsWith("LSPHooker") ||
                     it.className.startsWith("dalvik.")
             }
-            .take(12)
+            .take(15)
         val site = frames.firstOrNull()?.toString() ?: "unknown"
         if (!loggedCallers.add("$keyName@$site")) return
         info("Read of $keyName from:\n    " + frames.joinToString("\n    "))
@@ -197,7 +201,8 @@ class ZoomHook(private val module: MainHook) {
         module.hookMethod(method).intercept { chain ->
             if (chain.getArg(0) == CaptureRequest.CONTROL_ZOOM_RATIO) {
                 val ratio = (chain.getArg(1) as? Number)?.toFloat()
-                if (ratio != null && ratio != lastLoggedRequestZoom) {
+                // Only log near/above the stock 30x cap to keep the log short.
+                if (ratio != null && ratio >= 25f && ratio != lastLoggedRequestZoom) {
                     lastLoggedRequestZoom = ratio
                     info("CaptureRequest CONTROL_ZOOM_RATIO=$ratio")
                 }
