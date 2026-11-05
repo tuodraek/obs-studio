@@ -50,7 +50,9 @@ class DiagHook(private val module: MainHook) {
 
     private fun check(source: String, text: CharSequence) {
         val s = text.toString()
-        if (s.length > 500 || !PATTERN.containsMatchIn(s) || !seen.add(s)) return
+        if (s.length > 500 || !PATTERN.containsMatchIn(s)) return
+        VersionHook.tripped = true
+        if (!seen.add(s)) return
         val frames = Throwable().stackTrace
             .filterNot {
                 it.className.startsWith("com.experimental.gcam100x") ||
