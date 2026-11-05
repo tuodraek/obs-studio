@@ -56,8 +56,10 @@ adb logcat -c
 adb logcat -d | findstr GCam100x
 ```
 
-LSPosed may send module logs to its own log, not to logcat. If the command
-above prints nothing, look in **LSPosed Manager → Logs**.
+The module writes every message to logcat as well as to the LSPosed log.
+If the command
+above prints nothing at all, not even `Module loaded`, the module never
+ran inside the camera app: reboot once and check the LSPosed scope.
 
 You should see lines like:
 

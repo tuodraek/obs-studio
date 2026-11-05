@@ -100,8 +100,36 @@ class ZoomHook(private val module: MainHook) {
             if (loggedOverride.put(chars, true) == null) {
                 info("Overriding zoom limits on rear camera ($chars): ${key.name} $original -> $patched")
             }
+            logCallerOnce(key.name)
             patched
         }
+    }
+
+    private val loggedCallers: MutableSet<String> = Collections.synchronizedSet(HashSet())
+
+    /**
+     * Logs (once per key + call site) which Google Camera code reads the zoom
+     * limit. Those classes are where the app decides its own max zoom, i.e.
+     * the next thing to hook if the slider still stops at 30x.
+     */
+    private fun logCallerOnce(keyName: String) {
+        val frames = Throwable().stackTrace
+            .filterNot {
+                it.className.startsWith("android.") ||
+                    it.className.startsWith("java.") ||
+                    it.className.startsWith("kotlin.") ||
+                    it.className.startsWith("com.experimental.gcam100x") ||
+                    it.className.startsWith("io.github.libxposed") ||
+                    it.className.startsWith("org.lsposed") ||
+                    it.className.startsWith("org.matrix") ||
+                    it.className.startsWith("de.robv") ||
+                    it.className.startsWith("LSPHooker") ||
+                    it.className.startsWith("dalvik.")
+            }
+            .take(12)
+        val site = frames.firstOrNull()?.toString() ?: "unknown"
+        if (!loggedCallers.add("$keyName@$site")) return
+        info("Read of $keyName from:\n    " + frames.joinToString("\n    "))
     }
 
     private fun isRear(chars: CameraCharacteristics): Boolean {
