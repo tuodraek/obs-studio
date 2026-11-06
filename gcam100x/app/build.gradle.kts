@@ -1,4 +1,3 @@
-import java.net.URI
 
 plugins {
     alias(libs.plugins.android.application)
@@ -43,16 +42,5 @@ dependencies {
     implementation("com.google.ai.edge.litert:litert-gpu-api:1.4.2")
 }
 
-// Real-ESRGAN realesr-general-x4v3 (BSD-3-Clause, xinntao/Real-ESRGAN),
-// TFLite conversion. Downloaded at build time; not stored in git.
-val esrganModel = layout.projectDirectory.file("src/main/assets/realesr_general_x4v3.tflite")
-val fetchEsrgan by tasks.registering {
-    outputs.file(esrganModel)
-    onlyIf { !esrganModel.asFile.exists() }
-    doLast {
-        val url = "https://huggingface.co/JoPmt/Real_Esrgan_x2_Onnx_Tflite_Tfjs/resolve/main/ano_test/realesr-general-x4v3_float32.tflite"
-        esrganModel.asFile.parentFile.mkdirs()
-        URI(url).toURL().openStream().use { i -> esrganModel.asFile.outputStream().use { i.copyTo(it) } }
-    }
-}
-tasks.named("preBuild") { dependsOn(fetchEsrgan) }
+// Pro Zoom upscaler models: app/src/main/assets/prozoom_x4_*.tflite (see tools/convert_x4v3.py).
+

@@ -1,20 +1,22 @@
 package com.experimental.gcam100x
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Rect
 import android.util.Log
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.GpuDelegate
+import org.tensorflow.lite.nnapi.NnApiDelegate
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.zip.ZipFile
 
 /**
- * Real-ESRGAN (realesr-general-x4v3, compact) super-resolution (TFLite, GPU delegate with CPU
- * fallback). The model is run on 256x256 RGB tiles in [0,1] and returns
- * 1024x1024 tiles. Tiles overlap by [PAD] input pixels to hide seams.
+ * x4 super-resolution (Real-ESRGAN realesr-general-x4v3) on 256x256 tiles.
+ *
+ * Backends, fastest first, chosen by a one-tile benchmark at load time:
+ *  - Edge TPU through NNAPI ("google-edgetpu"), full-int8 model;
+ *  - GPU delegate, float model;
+ *  - CPU (XNNPACK), float model.
  */
 class SuperRes(private val module: MainHook) {
     companion object {
@@ -23,25 +25,18 @@ class SuperRes(private val module: MainHook) {
         private const val PAD = 12
         private const val CORE = TILE - 2 * PAD
         private const val SCALE = 4
-        private const val MODEL = "assets/realesr_general_x4v3.tflite"
+        private const val OUT = TILE * SCALE
     }
 
-    private var interpreter: Interpreter? = null
-    private var gpu: GpuDelegate? = null
-    var backend = "none"; private set
+    private class Backend(val name: String, val interp: Interpreter, val int8: Boolean, val closeable: AutoCloseable?)
 
-    @Synchronized
-    private fun ensure(): Interpreter {
-        interpreter?.let { return it }
+    private var be: Backend? = null
+    val backend: String get() = be?.name ?: "none"
+
+    private fun loadModel(asset: String): ByteBuffer {
         val apk = module.moduleApplicationInfo.sourceDir
-        // The module's class loader may not have a native library path; load
-        // the JNI libraries straight from the (uncompressed) module APK.
-        for (lib in listOf("libtensorflowlite_jni.so", "libtensorflowlite_gpu_jni.so")) {
-            runCatching { System.load("$apk!/lib/arm64-v8a/$lib") }
-                .onFailure { module.logMessage(Log.WARN, TAG, "SuperRes: System.load $lib: $it") }
-        }
-        val buf = ZipFile(File(apk)).use { z ->
-            val e = z.getEntry(MODEL) ?: error("model missing from module APK")
+        return ZipFile(File(apk)).use { z ->
+            val e = z.getEntry("assets/$asset") ?: error("$asset missing from module APK")
             val b = ByteBuffer.allocateDirect(e.size.toInt()).order(ByteOrder.nativeOrder())
             z.getInputStream(e).use { ins ->
                 val tmp = ByteArray(1 shl 20)
@@ -49,79 +44,124 @@ class SuperRes(private val module: MainHook) {
             }
             b.rewind(); b
         }
-        val it = try {
-            val d = GpuDelegate(GpuDelegate.Options().setPrecisionLossAllowed(true)
-                .setInferencePreference(GpuDelegate.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED))
-            Interpreter(buf, Interpreter.Options().addDelegate(d)).also { gpu = d; backend = "GPU" }
-        } catch (t: Throwable) {
-            module.logMessage(Log.WARN, TAG, "SuperRes: GPU delegate unavailable ($t), using CPU")
-            gpu?.close(); gpu = null
-            Interpreter(buf, Interpreter.Options().setNumThreads(3).setUseXNNPACK(true)).also { backend = "CPU" }
-        }
-        it.resizeInput(0, intArrayOf(1, TILE, TILE, 3))
-        it.allocateTensors()
-        interpreter = it
-        module.logMessage(Log.INFO, TAG, "SuperRes: realesr-general-x4v3 loaded ($backend)")
-        return it
     }
 
-    /** Loads the model (and compiles the GPU program) ahead of the first photo. */
+    private fun loadNatives() {
+        val apk = module.moduleApplicationInfo.sourceDir
+        for (lib in listOf("libtensorflowlite_jni.so", "libtensorflowlite_gpu_jni.so")) {
+            runCatching { System.load("$apk!/lib/arm64-v8a/$lib") }
+                .onFailure { module.logMessage(Log.WARN, TAG, "SuperRes: System.load $lib: $it") }
+        }
+    }
+
+    /** Times one tile; returns ms or null if the backend fails. */
+    private fun bench(b: Backend): Long? = runCatching {
+        val inBuf = ByteBuffer.allocateDirect(TILE * TILE * 3 * (if (b.int8) 1 else 4)).order(ByteOrder.nativeOrder())
+        val outBuf = ByteBuffer.allocateDirect(OUT * OUT * 3 * (if (b.int8) 1 else 4)).order(ByteOrder.nativeOrder())
+        b.interp.run(inBuf, outBuf) // first run compiles
+        inBuf.rewind(); outBuf.rewind()
+        val t = System.nanoTime()
+        b.interp.run(inBuf, outBuf)
+        (System.nanoTime() - t) / 1_000_000
+    }.onFailure { module.logMessage(Log.WARN, TAG, "SuperRes: ${b.name} failed: $it") }.getOrNull()
+
+    @Synchronized
+    private fun ensure(): Backend {
+        be?.let { return it }
+        loadNatives()
+        val int8 = loadModel("prozoom_x4_int8.tflite")
+        val f32 = loadModel("prozoom_x4_f32.tflite")
+        val candidates = ArrayList<Pair<Backend, Long>>()
+        runCatching {
+            val d = NnApiDelegate(NnApiDelegate.Options()
+                .setAcceleratorName("google-edgetpu")
+                .setUseNnapiCpu(false)
+                .setExecutionPreference(NnApiDelegate.Options.EXECUTION_PREFERENCE_SUSTAINED_SPEED))
+            Backend("TPU", Interpreter(int8, Interpreter.Options().addDelegate(d)), true, d)
+        }.onFailure { module.logMessage(Log.WARN, TAG, "SuperRes: TPU (NNAPI google-edgetpu) unavailable: $it") }
+            .getOrNull()?.let { b -> bench(b)?.let { candidates += b to it } ?: close(b) }
+        runCatching {
+            val d = GpuDelegate(GpuDelegate.Options().setPrecisionLossAllowed(true)
+                .setInferencePreference(GpuDelegate.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED))
+            Backend("GPU", Interpreter(f32, Interpreter.Options().addDelegate(d)), false, d)
+        }.onFailure { module.logMessage(Log.WARN, TAG, "SuperRes: GPU unavailable: $it") }
+            .getOrNull()?.let { b -> bench(b)?.let { candidates += b to it } ?: close(b) }
+        if (candidates.isEmpty()) {
+            val b = Backend("CPU", Interpreter(f32, Interpreter.Options().setNumThreads(4).setUseXNNPACK(true)), false, null)
+            candidates += b to (bench(b) ?: -1)
+        }
+        module.logMessage(Log.INFO, TAG, "SuperRes: tile benchmark " + candidates.joinToString { "${it.first.name}=${it.second} ms" })
+        val best = candidates.minBy { it.second }.first
+        candidates.filter { it.first !== best }.forEach { close(it.first) }
+        be = best
+        module.logMessage(Log.INFO, TAG, "SuperRes: using ${best.name}")
+        return best
+    }
+
+    private fun close(b: Backend) { runCatching { b.interp.close(); b.closeable?.close() } }
+
+    /** Loads the model and picks the backend ahead of the first photo. */
     fun warmUp() { ensure() }
 
     /** Returns a bitmap 4x the size of [src]. */
-    fun upscale4x(src: Bitmap, onProgress: (Int, Int) -> Unit = { _, _ -> }): Bitmap {
-        val interp = ensure()
+    fun upscale4x(src: Bitmap): Bitmap {
+        val b = ensure()
         val w = src.width; val h = src.height
         val out = Bitmap.createBitmap(w * SCALE, h * SCALE, Bitmap.Config.ARGB_8888)
-        val inBuf = ByteBuffer.allocateDirect(TILE * TILE * 3 * 4).order(ByteOrder.nativeOrder())
-        val outBuf = ByteBuffer.allocateDirect(TILE * SCALE * TILE * SCALE * 3 * 4).order(ByteOrder.nativeOrder())
+        val bpe = if (b.int8) 1 else 4
+        val inBuf = ByteBuffer.allocateDirect(TILE * TILE * 3 * bpe).order(ByteOrder.nativeOrder())
+        val outBuf = ByteBuffer.allocateDirect(OUT * OUT * 3 * bpe).order(ByteOrder.nativeOrder())
         val px = IntArray(TILE * TILE)
-        val opx = IntArray(TILE * SCALE * TILE * SCALE)
+        val opx = IntArray(OUT * OUT)
         val t0 = System.currentTimeMillis()
         var tiles = 0
-        val total = ((w + CORE - 1) / CORE) * ((h + CORE - 1) / CORE)
-        var lastPct = -1
         var y = 0
         while (y < h) {
             var x = 0
             while (x < w) {
-                // Input window = core tile + PAD on each side, clamped to the image.
                 val x0 = (x - PAD).coerceIn(0, maxOf(0, w - TILE))
                 val y0 = (y - PAD).coerceIn(0, maxOf(0, h - TILE))
                 val tw = minOf(TILE, w - x0); val th = minOf(TILE, h - y0)
                 java.util.Arrays.fill(px, 0)
                 src.getPixels(px, 0, TILE, x0, y0, tw, th)
                 inBuf.rewind()
-                for (i in 0 until TILE * TILE) {
-                    val c = px[i]
-                    inBuf.putFloat(((c shr 16) and 0xff) / 255f)
-                    inBuf.putFloat(((c shr 8) and 0xff) / 255f)
-                    inBuf.putFloat((c and 0xff) / 255f)
+                if (b.int8) {
+                    for (c in px) { inBuf.put((c shr 16).toByte()); inBuf.put((c shr 8).toByte()); inBuf.put(c.toByte()) }
+                } else {
+                    for (c in px) {
+                        inBuf.putFloat(((c shr 16) and 0xff) / 255f)
+                        inBuf.putFloat(((c shr 8) and 0xff) / 255f)
+                        inBuf.putFloat((c and 0xff) / 255f)
+                    }
                 }
                 inBuf.rewind(); outBuf.rewind()
-                interp.run(inBuf, outBuf)
+                b.interp.run(inBuf, outBuf)
                 outBuf.rewind()
-                val fb = outBuf.asFloatBuffer()
-                val ow = TILE * SCALE
-                for (i in 0 until ow * ow) {
-                    val r = (fb.get() * 255f + 0.5f).toInt().coerceIn(0, 255)
-                    val g = (fb.get() * 255f + 0.5f).toInt().coerceIn(0, 255)
-                    val b = (fb.get() * 255f + 0.5f).toInt().coerceIn(0, 255)
-                    opx[i] = (0xff shl 24) or (r shl 16) or (g shl 8) or b
+                if (b.int8) {
+                    for (i in 0 until OUT * OUT) {
+                        val r = outBuf.get().toInt() and 0xff
+                        val g = outBuf.get().toInt() and 0xff
+                        val bl = outBuf.get().toInt() and 0xff
+                        opx[i] = (0xff shl 24) or (r shl 16) or (g shl 8) or bl
+                    }
+                } else {
+                    val fb = outBuf.asFloatBuffer()
+                    for (i in 0 until OUT * OUT) {
+                        val r = (fb.get() * 255f + 0.5f).toInt().coerceIn(0, 255)
+                        val g = (fb.get() * 255f + 0.5f).toInt().coerceIn(0, 255)
+                        val bl = (fb.get() * 255f + 0.5f).toInt().coerceIn(0, 255)
+                        opx[i] = (0xff shl 24) or (r shl 16) or (g shl 8) or bl
+                    }
                 }
-                // Copy only the core region [x, x+CORE) x [y, y+CORE) to the output.
                 val cx1 = minOf(x + CORE, w); val cy1 = minOf(y + CORE, h)
                 val sx = (x - x0) * SCALE; val sy = (y - y0) * SCALE
-                val cw = (cx1 - x) * SCALE; val chh = (cy1 - y) * SCALE
-                out.setPixels(opx, sy * ow + sx, ow, x * SCALE, y * SCALE, cw, chh)
+                out.setPixels(opx, sy * OUT + sx, OUT, x * SCALE, y * SCALE, (cx1 - x) * SCALE, (cy1 - y) * SCALE)
                 tiles++
-                val pct = tiles * 100 / total
-                if (pct >= lastPct + 5) { lastPct = pct; onProgress(tiles, total) }
                 x += CORE
             }
             y += CORE
         }
-        module.logMessage(Log.INFO, TAG, "SuperRes: ${w}x$h -> ${w * SCALE}x${h * SCALE}, $tiles tiles in ${System.currentTimeMillis() - t0} ms ($backend)")
+        module.logMessage(Log.INFO, TAG, "SuperRes: ${w}x$h -> ${w * SCALE}x${h * SCALE}, $tiles tiles in ${System.currentTimeMillis() - t0} ms (${b.name})")
         return out
     }
 }

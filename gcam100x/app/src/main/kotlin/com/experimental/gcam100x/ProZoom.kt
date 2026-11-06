@@ -38,7 +38,11 @@ object ProZoom {
     /** At or above this zoom the crop is rebuilt with Real-ESRGAN; below it a high-quality resize. */
     private const val SR_MIN_ZOOM = 40f
 
-    class Shot(val scale: Float, val zoom: Float, val time: Long) { @Volatile var consumed = false }
+    class Shot(val scale: Float, val zoom: Float, val time: Long) {
+        @Volatile var consumed = false
+        /** Google Camera's shot object (rcb) this Pro Zoom shot's thumbnail belongs to. */
+        @Volatile var thumbKey: Any? = null
+    }
 
     private val shots = ConcurrentLinkedQueue<Shot>()
     private val fixedIds: MutableSet<Long> = Collections.synchronizedSet(HashSet())
@@ -54,12 +58,17 @@ object ProZoom {
     /** A shot was taken with Pro Zoom state (active, zoom, scale). */
     fun onShot(scale: Float, zoom: Float) {
         if (scale <= 0f || scale >= 0.999f) return
-        shots.add(Shot(scale, zoom, System.currentTimeMillis()))
+        val s = Shot(scale, zoom, System.currentTimeMillis())
+        last = s
+        shots.add(s)
         log("ProZoom: shot at ${zoom}x (scale $scale)")
-        // Warm the model up so the save is not delayed by loading it.
-        worker.post { runCatching { sr.warmUp() } }
         worker.postDelayed({ fallbackScan() }, 20_000)
     }
+
+    @Volatile private var last: Shot? = null
+
+    /** The most recent shot, if taken in the last 10 s. */
+    fun latestShot(): Shot? = last?.takeIf { System.currentTimeMillis() - it.time < 10_000 }
 
     /** Next unconsumed shot taken in the last 60 s. */
     fun claimShot(): Shot? {
@@ -90,6 +99,27 @@ object ProZoom {
             }
             log("ProZoom: save-pipeline hook on vnn.g()")
         }.onFailure { module.logMessage(Log.WARN, TAG, "ProZoom: vnn hook failed: $it") }
+        // Shot thumbnail (camera thumbnail button + Google Photos processing
+        // preview): rrg.c(shot, bitmap, rotation). Crop it to the zoom too.
+        runCatching {
+            val rrg = loader.loadClass("rrg")
+            val c = rrg.declaredMethods.first { it.name == "c" && it.parameterTypes.size == 3 && it.parameterTypes[1] == Bitmap::class.java }
+            module.hookMethod(c).intercept { chain ->
+                val bmp = chain.getArg(1) as? Bitmap
+                val key = chain.getArg(0)
+                var shot = last?.takeIf { it.thumbKey === key }
+                if (shot == null) shot = latestShot()?.takeIf { it.thumbKey == null && System.currentTimeMillis() - it.time < 3_000 }?.also { it.thumbKey = key }
+                if (bmp == null || shot == null || bmp.isRecycled) return@intercept chain.proceed()
+                val w = bmp.width; val h = bmp.height
+                val cw = (w * shot.scale).toInt().coerceAtLeast(2); val ch = (h * shot.scale).toInt().coerceAtLeast(2)
+                val crop = Bitmap.createBitmap(bmp, (w - cw) / 2, (h - ch) / 2, cw, ch)
+                val scaled = Bitmap.createScaledBitmap(crop, w, h, true)
+                if (crop !== bmp && crop !== scaled) crop.recycle()
+                log("ProZoom: thumbnail ${w}x$h cropped to ${shot.zoom}x")
+                chain.proceed(arrayOf(chain.getArg(0), scaled, chain.getArg(2)))
+            }
+            log("ProZoom: thumbnail hook on rrg.c()")
+        }.onFailure { module.logMessage(Log.WARN, TAG, "ProZoom: thumbnail hook failed: $it") }
     }
 
     /** Buffers Google Camera's JPEG and writes the Pro Zoom result on close. */
@@ -185,6 +215,8 @@ object ProZoom {
     fun register(ctx: Context) {
         if (appContext != null) return
         appContext = ctx.applicationContext
+        // Pick the TPU/GPU backend while the camera is idle.
+        worker.post { runCatching { sr.warmUp() } }
         val cr = ctx.applicationContext.contentResolver
         cr.registerContentObserver(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, true, object : ContentObserver(worker) {
             override fun onChange(selfChange: Boolean, uri: Uri?) {}
