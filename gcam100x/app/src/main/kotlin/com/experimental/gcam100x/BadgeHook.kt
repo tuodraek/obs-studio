@@ -25,6 +25,7 @@ class BadgeHook(private val module: MainHook) {
                 val r = chain.proceed()
                 val act = chain.thisObject as? Activity
                 if (act != null && toasted.compareAndSet(false, true)) {
+                    runCatching { PostCropHook.register(act) }.onFailure { module.logMessage(Log.WARN, "GCam100x", "Post-crop register failed: $it") }
                     val f = act.getExternalFilesDir(null)?.let { java.io.File(it, "gcam100x.log") }
                     if (f != null) module.attachLogFile(f)
                     val err = module.lastError

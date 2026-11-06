@@ -22,6 +22,7 @@ class MainHook : XposedModule() {
         if (!installed.compareAndSet(false, true)) return
         logMessage(Log.INFO, TAG, "GCam100x ${BuildConfig.VERSION_NAME} starting in ${param.packageName}")
         ManifestHook(this).install(param)
+        PostCropHook.init(this)
         BadgeHook(this).install(param)
         VersionHook(this).install(param)
         DiagHook(this).install()

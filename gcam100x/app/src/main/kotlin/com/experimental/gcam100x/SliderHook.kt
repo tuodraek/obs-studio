@@ -177,6 +177,8 @@ class SliderHook(private val module: MainHook) {
     }
 
     @Volatile private var lastActiveTnm: Any? = null
+    @Volatile private var lastZoom = 0f
+    @Volatile private var lastZoomTime = 0L
 
     /**
      * Capture: mye picks the CENTAUR (Pro Zoom) fusion for a shot only when the
@@ -194,6 +196,16 @@ class SliderHook(private val module: MainHook) {
                 val live = lastActiveTnm
                 val cur = chain.getArg(idx)
                 module.logMessage(Log.INFO, TAG, "Shot created: Pro Zoom state on shot = $cur (live active = $live)")
+                // Queue the beyond-30x crop for the saved photo.
+                (live ?: cur)?.let { t ->
+                    runCatching {
+                        val b = tnm.getDeclaredField("b").getBoolean(t)
+                        val z = tnm.getDeclaredField("c").getFloat(t)
+                        val sc = tnm.getDeclaredField("d").getFloat(t)
+                        if (b) PostCropHook.onShot(sc, z)
+                        else if (lastZoom > 30f && System.currentTimeMillis() - lastZoomTime < 5000) PostCropHook.onShot(30f / lastZoom, lastZoom)
+                    }
+                }
                 if (live != null && cur !== live) {
                     val args = Array<Any?>(ctor.parameterTypes.size) { chain.getArg(it) }
                     args[idx] = live
@@ -279,6 +291,7 @@ class SliderHook(private val module: MainHook) {
             var last = ""
             module.hookCtor(ctor).intercept { chain ->
                 val r = chain.proceed()
+                (chain.getArg(1) as? Float)?.let { z -> if (z > 0f) { lastZoom = z; lastZoomTime = System.currentTimeMillis() } }
                 if (chain.getArg(0) == true) lastActiveTnm = chain.thisObject
                 else if ((chain.getArg(1) as? Float ?: 0f) > 0f) lastActiveTnm = null
                 val desc = "active=${chain.getArg(0)} zoom=${chain.getArg(1)} scale=${chain.getArg(2)}"
