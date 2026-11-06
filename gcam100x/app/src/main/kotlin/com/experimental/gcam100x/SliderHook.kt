@@ -36,6 +36,7 @@ class SliderHook(private val module: MainHook) {
         hookFloat(loader, "tmu", "a") { v -> maxOf(v, TARGET) }
         hookViewfinderDiag(loader)
         hookProZoomState(loader)
+        hookCapture(loader)
         // kkp.a() builds the zoom stops; it only adds the Pro Zoom level when
         // kkp.v (a "Pro Zoom UI active" observable) is true. kmd reads the same
         // observable as ub.i. Wrap both so d() reports true.
@@ -175,6 +176,72 @@ class SliderHook(private val module: MainHook) {
         }.onFailure { module.logMessage(Log.WARN, TAG, "tmp.o hook failed: $it") }
     }
 
+    @Volatile private var lastActiveTnm: Any? = null
+
+    /**
+     * Capture: mye picks the CENTAUR (Pro Zoom) fusion for a shot only when the
+     * shot's pcl.n (a tnm) is active. In this build pcl.n is only ever set to
+     * the inactive default, so put the live Pro Zoom state on each shot, and
+     * log what the Pro Zoom processor (tna.c) does with it.
+     */
+    private fun hookCapture(loader: ClassLoader) {
+        runCatching {
+            val pcl = loader.loadClass("pcl")
+            val tnm = loader.loadClass("tnm")
+            val ctor = pcl.declaredConstructors.first { it.parameterTypes.size == 18 }
+            val idx = ctor.parameterTypes.indexOf(tnm)
+            module.hookCtor(ctor).intercept { chain ->
+                val live = lastActiveTnm
+                val cur = chain.getArg(idx)
+                if (live != null && cur !== live) {
+                    val args = Array<Any?>(ctor.parameterTypes.size) { chain.getArg(it) }
+                    args[idx] = live
+                    module.logMessage(Log.INFO, TAG, "Shot: attaching Pro Zoom state $live (was $cur)")
+                    return@intercept chain.proceed(args)
+                }
+                chain.proceed()
+            }
+            module.logMessage(Log.INFO, TAG, "Capture hook on pcl(tnm @ $idx)")
+        }.onFailure { module.logMessage(Log.WARN, TAG, "pcl hook failed: $it") }
+        runCatching {
+            val tna = loader.loadClass("tna")
+            val iF = tna.getDeclaredField("i").apply { isAccessible = true }
+            for (m in tna.declaredMethods) {
+                if (m.name == "c" && m.parameterTypes.size == 7) {
+                    module.hookMethod(m).intercept { chain ->
+                        module.logMessage(Log.INFO, TAG, "Pro Zoom processor tna.c: shot=${chain.getArg(0)} initialized=${iF.get(chain.thisObject)} primary=${chain.getArg(2)} secondary=${chain.getArg(3)}")
+                        try { chain.proceed() } catch (t: Throwable) {
+                            module.logMessage(Log.WARN, TAG, "tna.c threw ${Log.getStackTraceString(t)}"); throw t
+                        }
+                    }
+                }
+                if (m.name == "i" && m.parameterTypes.isEmpty()) {
+                    module.hookMethod(m).intercept { chain ->
+                        module.logMessage(Log.INFO, TAG, "Pro Zoom processor init (tna.i)")
+                        try { chain.proceed().also { module.logMessage(Log.INFO, TAG, "tna.i done, initialized=${iF.get(chain.thisObject)}") } } catch (t: Throwable) {
+                            module.logMessage(Log.WARN, TAG, "tna.i threw ${Log.getStackTraceString(t)}"); throw t
+                        }
+                    }
+                }
+            }
+        }.onFailure { module.logMessage(Log.WARN, TAG, "tna hook failed: $it") }
+        runCatching {
+            // Fusion mode selection result per shot.
+            val myh = loader.loadClass("myh")
+            val apply = myh.getDeclaredMethod("apply", Any::class.java)
+            val dF = myh.getDeclaredField("d").apply { isAccessible = true }
+            val eF = myh.getDeclaredField("e").apply { isAccessible = true }
+            module.hookMethod(apply).intercept { chain ->
+                val r = chain.proceed()
+                if (runCatching { eF.getInt(chain.thisObject) }.getOrDefault(1) == 0) {
+                    val mode = runCatching { dF.get(chain.thisObject)?.let { it.javaClass.getMethod("a").invoke(it) } }.getOrNull()
+                    module.logMessage(Log.INFO, TAG, "Shot fusion mode: $mode")
+                }
+                r
+            }
+        }.onFailure { module.logMessage(Log.WARN, TAG, "myh hook failed: $it") }
+    }
+
     /** Diagnostics for the beyond-30x viewfinder path. */
     private fun hookViewfinderDiag(loader: ClassLoader) {
         // tnm(active, zoom, previewScale): previewScale = threshold/zoom when active.
@@ -184,6 +251,8 @@ class SliderHook(private val module: MainHook) {
             var last = ""
             module.hookCtor(ctor).intercept { chain ->
                 val r = chain.proceed()
+                if (chain.getArg(0) == true) lastActiveTnm = chain.thisObject
+                else if ((chain.getArg(1) as? Float ?: 0f) > 0f) lastActiveTnm = null
                 val desc = "active=${chain.getArg(0)} zoom=${chain.getArg(1)} scale=${chain.getArg(2)}"
                 val zoom = (chain.getArg(1) as? Float) ?: 0f
                 if (zoom >= 20f && desc != last) { last = desc; module.logMessage(Log.INFO, TAG, "Pro Zoom state: $desc") }
