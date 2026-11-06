@@ -38,7 +38,11 @@ object PostCropHook {
     private lateinit var module: MainHook
     private lateinit var handler: Handler
 
-    fun init(m: MainHook) { module = m }
+    private lateinit var sr: SuperRes
+    /** At or above this zoom the crop is rebuilt with Real-ESRGAN; below it a plain resize. */
+    private const val SR_MIN_ZOOM = 45f
+
+    fun init(m: MainHook) { module = m; sr = SuperRes(m) }
 
     /** Called when a shot is created; scale/zoom from its Pro Zoom state. */
     fun onShot(scale: Float, zoom: Float) {
@@ -125,8 +129,20 @@ object PostCropHook {
         val left = (w - cw) / 2; val top = (h - ch) / 2
         val region = decoder.decodeRegion(Rect(left, top, left + cw, top + ch), null)
         decoder.recycle()
-        val scaled = Bitmap.createScaledBitmap(region, w, h, true)
-        region.recycle()
+        val scaled = if (p.zoom >= SR_MIN_ZOOM) {
+            // Model input: the crop at 1/4 of the output size (exact for 120x),
+            // so the x4 network output is the full photo resolution.
+            val small = if (region.width != w / 4 || region.height != h / 4)
+                Bitmap.createScaledBitmap(region, w / 4, h / 4, true).also { region.recycle() } else region
+            toast(ctx, "Pro Res Zoom: enhancing ${p.zoom.toInt()}× photo…")
+            val up = try { sr.upscale4x(small) } catch (t: Throwable) {
+                module.logMessage(Log.WARN, TAG, "SuperRes failed, plain resize: ${Log.getStackTraceString(t)}")
+                Bitmap.createScaledBitmap(small, w, h, true)
+            } finally { small.recycle() }
+            if (up.width != w || up.height != h) Bitmap.createScaledBitmap(up, w, h, true).also { up.recycle() } else up
+        } else {
+            Bitmap.createScaledBitmap(region, w, h, true).also { region.recycle() }
+        }
         val out = ByteArrayOutputStream(original.size)
         scaled.compress(Bitmap.CompressFormat.JPEG, 95, out)
         scaled.recycle()
@@ -141,6 +157,12 @@ object PostCropHook {
         val size = cr.openFileDescriptor(uri, "r")?.use { it.statSize } ?: -1L
         module.logMessage(Log.INFO, TAG, "Post-crop: $uri ${w}x$h cropped to ${cw}x$ch (zoom ${p.zoom}x) and saved")
         return size
+    }
+
+    private fun toast(ctx: Context, msg: String) {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            runCatching { android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_SHORT).show() }
+        }
     }
 
     private val EXIF_TAGS = arrayOf(

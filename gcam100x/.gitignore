@@ -9,3 +9,6 @@ local.properties
 
 # obs-studio ignores *.xml; Android projects need these
 !*.xml
+
+# Downloaded at build time (see app/build.gradle.kts)
+app/src/main/assets/real_esrgan_x4plus.tflite
