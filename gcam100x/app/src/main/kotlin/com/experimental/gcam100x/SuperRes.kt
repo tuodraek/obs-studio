@@ -123,7 +123,8 @@ class SuperRes(private val module: MainHook) {
         val px = IntArray(TILE * TILE)
         val opx = IntArray(OUT * OUT)
         val qin = ByteArray(256) { ((it / 255f) / b.inScale + b.inZero + 0.5f).toInt().coerceIn(0, 255).toByte() }
-        val qout = IntArray(256) { ((((it - b.outZero) * b.outScale) * 255f) + 0.5f).toInt().coerceIn(0, 255) }
+        // Dequantized residual in 0..255 units (signed).
+        val qout = IntArray(256) { Math.round((it - b.outZero) * b.outScale * 255f) }
         val t0 = System.currentTimeMillis()
         var tiles = 0
         var y = 0
@@ -149,10 +150,13 @@ class SuperRes(private val module: MainHook) {
                 b.interp.run(inBuf, outBuf)
                 outBuf.rewind()
                 if (b.int8) {
+                    // The int8 model outputs the detail residual; add the
+                    // nearest-upsampled input back at full precision.
                     for (i in 0 until OUT * OUT) {
-                        val r = qout[outBuf.get().toInt() and 0xff]
-                        val g = qout[outBuf.get().toInt() and 0xff]
-                        val bl = qout[outBuf.get().toInt() and 0xff]
+                        val c = px[((i / OUT) shr 2) * TILE + ((i % OUT) shr 2)]
+                        val r = (((c shr 16) and 0xff) + qout[outBuf.get().toInt() and 0xff]).coerceIn(0, 255)
+                        val g = (((c shr 8) and 0xff) + qout[outBuf.get().toInt() and 0xff]).coerceIn(0, 255)
+                        val bl = ((c and 0xff) + qout[outBuf.get().toInt() and 0xff]).coerceIn(0, 255)
                         opx[i] = (0xff shl 24) or (r shl 16) or (g shl 8) or bl
                     }
                 } else {

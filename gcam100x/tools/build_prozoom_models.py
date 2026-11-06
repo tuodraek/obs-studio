@@ -8,7 +8,9 @@ result keeps natural texture instead of a painted, over-sharpened look.
     python3 build_prozoom_models.py realesr-general-x4v3.pth realesr-general-wdn-x4v3.pth [strength]
 
 Outputs (static 1x256x256x3 input, x4 output):
-  prozoom_x4_int8.tflite  full-integer (uint8 I/O) for the Edge TPU via NNAPI
+  prozoom_x4_int8.tflite  full-integer (uint8 I/O) for the Edge TPU via NNAPI;
+                          outputs the x4 detail residual only (app adds the
+                          nearest-upsampled input)
   prozoom_x4_f32.tflite   float for the GPU / CPU fallback
 The .pth files are read with pth_reader (no unpickling).
 Requires: tensorflow, numpy, scikit-image (calibration images).
@@ -32,7 +34,7 @@ def perm():
                 p[(i * 4 + j) * 3 + c] = c * 16 + i * 4 + j
     return p
 
-def build(W):
+def build(W, residual_only=False):
     layers = []; idx = 0
     while f"body.{idx}.weight" in W:
         w = W[f"body.{idx}.weight"]
@@ -50,14 +52,19 @@ def build(W):
         h = x
         for t, a, b in layers:
             h = tf.nn.conv2d(h, a, 1, "SAME") + b if t == "c" else tf.maximum(h, 0.) + a * tf.minimum(h, 0.)
-        return tf.nn.depth_to_space(h, 4) + tf.image.resize(x, (T * 4, T * 4), method="nearest")
+        r = tf.nn.depth_to_space(h, 4)
+        # The int8 (TPU) model outputs only the detail residual: quantizing
+        # "input + residual" leaves too few levels for the detail (4x4 blocks).
+        # The app adds the nearest-upsampled input back in float.
+        return r if residual_only else r + tf.image.resize(x, (T * 4, T * 4), method="nearest")
     return f
 
 if __name__ == "__main__":
     A = load_pth(sys.argv[1]); B = load_pth(sys.argv[2])
     s = float(sys.argv[3]) if len(sys.argv) > 3 else 0.5
-    f = build({k: s * A[k] + (1 - s) * B[k] for k in A})
-    conc = f.get_concrete_function()
+    Wm = {k: s * A[k] + (1 - s) * B[k] for k in A}
+    conc = build(Wm).get_concrete_function()
+    conc_res = build(Wm, residual_only=True).get_concrete_function()
     imgs = [i for i in (sd.astronaut(), sd.coffee(), sd.chelsea(), sd.rocket(), sd.hubble_deep_field(),
                         sd.immunohistochemistry(), sd.retina()) if i.ndim == 3]
     rng = np.random.default_rng(0)
@@ -70,7 +77,7 @@ if __name__ == "__main__":
 
     open("prozoom_x4_f32.tflite", "wb").write(tf.lite.TFLiteConverter.from_concrete_functions([conc]).convert())
     print("float model written", flush=True)
-    q = tf.lite.TFLiteConverter.from_concrete_functions([conc])
+    q = tf.lite.TFLiteConverter.from_concrete_functions([conc_res])
     q.optimizations = [tf.lite.Optimize.DEFAULT]
     q.representative_dataset = rep
     q.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
