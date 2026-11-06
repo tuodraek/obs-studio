@@ -25,6 +25,7 @@ class MainHook : XposedModule() {
         DiagHook(this).install()
         FlagHook(this).install(param)
         ZoomHook(this).install()
+        SliderHook(this).install(param)
     }
 
     fun hookMethod(method: Method) = hook(method)
