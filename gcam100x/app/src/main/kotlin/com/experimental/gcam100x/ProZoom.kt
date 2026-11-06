@@ -40,7 +40,7 @@ object ProZoom {
     /** Longest network input side (bounds the time at low Pro Zoom levels). */
     private const val SR_IN_MAX = 1024
     /** How much of the network's luminance detail is applied. */
-    private const val DETAIL = 0.8f
+    private const val DETAIL = 0.85f
     /** Minimum NCC score to trust the viewfinder match. */
     private const val MIN_MATCH = 0.5f
 
@@ -54,6 +54,9 @@ object ProZoom {
         @Volatile var thumbOut: Bitmap? = null
         /** The finished photo has been written. */
         @Volatile var done = false
+        /** Small grey copies of the shot thumbnail before / after framing. */
+        @Volatile var sigIn: Align.Gray? = null
+        @Volatile var sigOut: Align.Gray? = null
     }
 
     private val shots = ConcurrentLinkedQueue<Shot>()
@@ -71,11 +74,58 @@ object ProZoom {
     fun onShot(scale: Float, zoom: Float) {
         if (scale <= 0f || scale >= 0.999f) return
         val s = Shot(scale, zoom, System.currentTimeMillis())
-        s.view = lastView?.takeIf { kotlin.math.abs(it.time - s.time) < 2_500 }
+        s.view = lastView?.takeIf { kotlin.math.abs(it.time - s.time) < 400 }
         last = s
+        if (s.view == null) grabViewfinder(s)
         shots.add(s)
         log("ProZoom: shot at ${zoom}x (scale $scale), viewfinder frame ${s.view?.let { "${it.gray.w}x${it.gray.h} captured" } ?: "not yet"}")
         worker.postDelayed({ fallbackScan() }, 20_000)
+    }
+
+    @Volatile var activity: java.lang.ref.WeakReference<android.app.Activity>? = null
+    private val main by lazy { Handler(android.os.Looper.getMainLooper()) }
+
+    private fun findPreview(v: android.view.View, best: Array<android.view.View?>) {
+        if (v.visibility != android.view.View.VISIBLE || v.width <= 0 || v.height <= 0) return
+        if (v is android.view.SurfaceView || v is android.view.TextureView) {
+            val b = best[0]
+            if (b == null || v.width.toLong() * v.height > b.width.toLong() * b.height) best[0] = v
+        }
+        if (v is android.view.ViewGroup) for (i in 0 until v.childCount) findPreview(v.getChildAt(i), best)
+    }
+
+    /**
+     * Copies the on-screen viewfinder (Google Camera's Pro Zoom cropped
+     * preview, exactly what the user sees) at the shutter: the reference for
+     * 1:1 framing and for checking thumbnails.
+     */
+    private fun grabViewfinder(shot: Shot) {
+        val act = activity?.get() ?: run { log("ProZoom: viewfinder grab: no activity"); return }
+        main.post {
+            runCatching {
+                val holder = arrayOfNulls<android.view.View>(1)
+                findPreview(act.window.decorView, holder)
+                val v = holder[0] ?: run { log("ProZoom: viewfinder grab: no preview surface"); return@post }
+                val w = maxOf(8, v.width / 3); val h = maxOf(8, v.height / 3)
+                val t0 = System.currentTimeMillis()
+                fun done(bmp: Bitmap) {
+                    val view = Align.View(Align.gray(bmp, 384), System.currentTimeMillis())
+                    bmp.recycle()
+                    if (shot.view == null) shot.view = view
+                    lastView = view
+                    log("ProZoom: viewfinder grabbed from ${v.javaClass.simpleName} ${v.width}x${v.height} in ${System.currentTimeMillis() - t0} ms")
+                }
+                if (v is android.view.TextureView) {
+                    v.getBitmap(w, h)?.let { done(it) }
+                } else {
+                    val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                    android.view.PixelCopy.request(v as android.view.SurfaceView, bmp, { r ->
+                        if (r == android.view.PixelCopy.SUCCESS) worker.post { done(bmp) }
+                        else log("ProZoom: viewfinder grab failed (PixelCopy $r)")
+                    }, main)
+                }
+            }.onFailure { log("ProZoom: viewfinder grab failed: $it") }
+        }
     }
 
     @Volatile private var last: Shot? = null
@@ -175,12 +225,16 @@ object ProZoom {
      * (its centre crop matches the viewfinder better than the whole image).
      * Null when there is nothing to compare against.
      */
-    private fun looksUnzoomed(bmp: Bitmap, shot: Shot): Boolean? {
-        val v = viewFor(shot) ?: return null
-        val g = Align.gray(bmp, 160)
-        val whole = Align.similarity(g, v.gray)
-        val centre = Align.similarity(Align.crop(g, shot.scale), v.gray)
-        return centre > whole + 0.05f
+    private fun looksUnzoomed(bmp: Bitmap, shot: Shot): Boolean {
+        val g = Align.gray(bmp, 96)
+        // Compare with the shot thumbnail before/after framing, if seen.
+        val sIn = shot.sigIn; val sOut = shot.sigOut
+        if (sIn != null && sOut != null) return Align.similarity(g, sIn) > Align.similarity(g, sOut)
+        // Else with the viewfinder.
+        val v = viewFor(shot)
+        if (v != null) return Align.similarity(Align.crop(g, shot.scale), v.gray) > Align.similarity(g, v.gray) + 0.05f
+        // Nothing framed has been produced for this shot yet: it is the 30x image.
+        return true
     }
 
     /** The last place a thumbnail is drawn: bottom-bar ThumbnailView.b(bitmap, ...). */
@@ -192,7 +246,7 @@ object ProZoom {
                 val bmp = chain.getArg(0) as? Bitmap
                 val shot = last?.takeIf { !it.done && System.currentTimeMillis() - it.time < 30_000 }
                 if (bmp == null || bmp.isRecycled || shot == null || ours.containsKey(bmp)) return@intercept chain.proceed()
-                val unzoomed = runCatching { looksUnzoomed(bmp, shot) }.getOrNull()
+                val unzoomed = runCatching { looksUnzoomed(bmp, shot) }.getOrDefault(true)
                 if (unzoomed != true) {
                     log("ProZoom: thumbnail view ${bmp.width}x${bmp.height} already Pro Zoom (check=$unzoomed)")
                     return@intercept chain.proceed()
@@ -231,6 +285,7 @@ object ProZoom {
             if (crop !== bmp && crop !== scaled) crop.recycle()
             ours[scaled] = true
             shot.thumbIn = bmp; shot.thumbOut = scaled
+            runCatching { shot.sigIn = Align.gray(bmp, 96); shot.sigOut = Align.gray(scaled, 96) }
             log("ProZoom: thumbnail ($where) ${w}x$h framed to ${shot.zoom}x; framing: $how")
             return scaled
         }
@@ -320,8 +375,8 @@ object ProZoom {
     }
 
     /**
-     * Adds the network's luminance detail onto the real photo: colour, tone
-     * and grain stay the photo's own; only structure comes from the model.
+     * Adds the network's luminance detail onto [real] (the clean base):
+     * colour and tone stay the photo's own; structure comes from the model.
      */
     private fun lumaBlend(real: Bitmap, ai: Bitmap, a: Float): Bitmap {
         val w = real.width; val h = real.height
@@ -370,10 +425,16 @@ object ProZoom {
         val full: Bitmap = try {
             val f = maxOf(SR_IN_DIV.toFloat(), maxOf(cw, ch) / SR_IN_MAX.toFloat())
             val small = downscale(region, maxOf(64, (cw / f).toInt()), maxOf(64, (ch / f).toInt()))
-            val up = sr.upscale4x(small).also { if (small !== region) small.recycle() }
+            val up = sr.upscale4x(small)
             mode = "AI ${sr.backend}"
             val upN = if (up.width == cw && up.height == ch) up else Bitmap.createScaledBitmap(up, cw, ch, true).also { up.recycle() }
-            lumaBlend(region, upN, DETAIL).also { upN.recycle(); region.recycle() }
+            // Base = the crop averaged down to its real detail scale and back
+            // up: Google Camera's sharpening halos and pixel noise (magnified
+            // 4x at 120x) are averaged out, colour stays the photo's own.
+            val clean = Bitmap.createScaledBitmap(small, cw, ch, true)
+            if (small !== region) small.recycle()
+            region.recycle()
+            lumaBlend(clean, upN, DETAIL).also { upN.recycle(); clean.recycle() }
         } catch (t: Throwable) {
             module.logMessage(Log.WARN, TAG, "ProZoom: upscaler failed ($t); exact crop")
             mode = "exact crop (upscaler failed)"
