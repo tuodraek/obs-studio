@@ -44,6 +44,8 @@ class ZoomHook(private val module: MainHook) {
 
     @Volatile
     private var lastLoggedRequestZoom: Float? = null
+    @Volatile
+    private var stabLogged = false
 
     fun install() {
         // Do NOT raise the reported zoom range: Google Camera only enables the
@@ -200,8 +202,20 @@ class ZoomHook(private val module: MainHook) {
         val method = CaptureRequest.Builder::class.java.getDeclaredMethod(
             "set", CaptureRequest.Key::class.java, Any::class.java
         )
+        val stabKey = CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE
         module.hookMethod(method).intercept { chain ->
-            if (chain.getArg(0) == CaptureRequest.CONTROL_ZOOM_RATIO) {
+            val key = chain.getArg(0)
+            // Above 30x the Pro Zoom crop magnifies the HAL's preview
+            // stabilization shifts (drift, and a still that does not match the
+            // preview). Keep preview stabilization off while Pro Zoom is active.
+            if (key == stabKey && ProZoom.liveScale < 0.999f && (chain.getArg(1) as? Int ?: 0) != 0) {
+                if (!stabLogged) { stabLogged = true; info("Preview stabilization ${chain.getArg(1)} -> 0 while Pro Zoom is active") }
+                return@intercept chain.proceed(arrayOf(stabKey, 0))
+            }
+            if (key == CaptureRequest.CONTROL_ZOOM_RATIO && ProZoom.liveScale < 0.999f) {
+                runCatching { (chain.thisObject as CaptureRequest.Builder).set(stabKey, 0) }
+            }
+            if (key == CaptureRequest.CONTROL_ZOOM_RATIO) {
                 val ratio = (chain.getArg(1) as? Number)?.toFloat()
                 // Only log near/above the stock 30x cap to keep the log short.
                 if (ratio != null && ratio >= 25f && ratio != lastLoggedRequestZoom) {

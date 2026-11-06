@@ -198,25 +198,30 @@ object ProZoom {
         val dec = BitmapRegionDecoder.newInstance(jpeg, 0, jpeg.size, false)!!
         val region = dec.decodeRegion(Rect(left, top, left + cw, top + ch), null)
         dec.recycle()
-        val full: Bitmap = if (shot.zoom >= SR_MIN_ZOOM) {
+        val ctx = appContext
+        val enhance = ctx != null && Prefs.aiEnhance(ctx) && shot.zoom >= SR_MIN_ZOOM
+        val full: Bitmap = if (enhance) {
             // Network input = the crop at 1/4 of the output size (exact at 120x).
             val small = if (region.width == w / 4 && region.height == h / 4) region
                 else Bitmap.createScaledBitmap(region, w / 4, h / 4, true).also { region.recycle() }
             val up = try { sr.upscale4x(small) } catch (t: Throwable) {
-                module.logMessage(Log.WARN, TAG, "ProZoom: enhancement unavailable (${t}); resize only")
+                module.logMessage(Log.WARN, TAG, "ProZoom: enhancement unavailable (${t}); plain crop")
                 Bitmap.createScaledBitmap(small, w, h, true)
             } finally { small.recycle() }
             if (up.width == w && up.height == h) up else Bitmap.createScaledBitmap(up, w, h, true).also { up.recycle() }
         } else {
-            Bitmap.createScaledBitmap(region, w, h, true).also { region.recycle() }
+            // Default: the exact crop at its native resolution. No resampling,
+            // no invented detail, minimal work.
+            region
         }
         val enc = ByteArrayOutputStream(jpeg.size)
         full.compress(Bitmap.CompressFormat.JPEG, 95, enc)
         full.recycle()
         val outBytes = copyExif(jpeg, enc.toByteArray(), shot.zoom)
         val ms = System.currentTimeMillis() - t0
-        lastResult = "${shot.zoom.toInt()}× · ${w}×$h · $ms ms (${if (shot.zoom >= SR_MIN_ZOOM) sr.backend else "resize"})"
-        log("ProZoom: ${w}x$h at ${shot.zoom}x (crop ${cw}x$ch) done in $ms ms (${sr.backend})")
+        val mode = if (enhance) "AI ${sr.backend}" else "native crop"
+        lastResult = "${shot.zoom.toInt()}× · ${cw}×$ch from ${w}×$h · $ms ms ($mode)"
+        log("ProZoom: ${w}x$h at ${shot.zoom}x -> ${cw}x$ch in $ms ms ($mode)")
         return outBytes
     }
 
@@ -241,7 +246,7 @@ object ProZoom {
         if (appContext != null) return
         appContext = ctx.applicationContext
         // Pick the TPU/GPU backend while the camera is idle.
-        worker.post { runCatching { sr.warmUp() } }
+        worker.post { runCatching { if (Prefs.aiEnhance(ctx.applicationContext)) sr.warmUp() } }
         val cr = ctx.applicationContext.contentResolver
         cr.registerContentObserver(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, true, object : ContentObserver(worker) {
             override fun onChange(selfChange: Boolean, uri: Uri?) {}

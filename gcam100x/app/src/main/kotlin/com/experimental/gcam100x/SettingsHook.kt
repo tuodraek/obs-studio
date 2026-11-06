@@ -93,6 +93,8 @@ class SettingsHook(private val module: MainHook) {
             appendLine("Pro Zoom")
             appendLine("  Range: 30× hardware, up to 120× Pro Zoom")
             appendLine("  Pro Zoom model download (centaur_p26): ${ProZoom.modelState ?: "not checked yet"}")
+            appendLine("  Output: ${if (Prefs.aiEnhance(ctx)) "AI enhanced (from 40×)" else "native-resolution crop (exact, no resampling)"}")
+            appendLine("  Preview stabilization above 30×: off (no drift)")
             appendLine("  Upscaler: realesr-general-x4v3 (Real-ESRGAN, BSD-3)")
             appendLine("    int8 for Edge TPU (NNAPI google-edgetpu), float for GPU/CPU")
             appendLine("  Backend: ${ProZoom.sr.backend}")
@@ -114,16 +116,29 @@ class SettingsHook(private val module: MainHook) {
             setPadding(pad, pad / 2, pad, 0)
             movementMethod = ScrollingMovementMethod()
         }
+        val aiBox = android.widget.CheckBox(ctx).apply {
+            setText("AI enhancement (slower, adds detail)")
+            isChecked = Prefs.aiEnhance(ctx)
+            setOnCheckedChangeListener { _, on -> Prefs.setAiEnhance(ctx, on); if (on) Thread { runCatching { ProZoom.sr.warmUp() } }.start() }
+        }
+        val toastBox = android.widget.CheckBox(ctx).apply {
+            setText("Show \"GCam100x active\" toast")
+            isChecked = Prefs.toastEnabled(ctx)
+            setOnCheckedChangeListener { _, on -> Prefs.setToastEnabled(ctx, on) }
+        }
+        val column = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            val pad = (20 * resources.displayMetrics.density).toInt()
+            addView(aiBox); addView(toastBox)
+            aiBox.setPadding(pad / 2, 0, 0, 0); toastBox.setPadding(pad / 2, 0, 0, 0)
+            addView(tv)
+            setPadding(pad / 2, pad / 2, pad / 2, 0)
+        }
         AlertDialog.Builder(ctx)
             .setTitle("GCam100x")
-            .setView(ScrollView(ctx).apply { addView(tv) })
+            .setView(ScrollView(ctx).apply { addView(column) })
             .setPositiveButton("Close", null)
             .setNeutralButton("Copy log") { _, _ -> copyLog(ctx, text) }
-            .setNegativeButton(if (Prefs.toastEnabled(ctx)) "Disable toast" else "Enable toast") { _, _ ->
-                val on = !Prefs.toastEnabled(ctx)
-                Prefs.setToastEnabled(ctx, on)
-                Toast.makeText(ctx, "GCam100x startup toast ${if (on) "enabled" else "disabled"}", Toast.LENGTH_SHORT).show()
-            }
             .show()
     }
 
