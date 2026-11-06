@@ -63,11 +63,13 @@ if __name__ == "__main__":
     rng = np.random.default_rng(0)
 
     def rep():
-        for k in range(160):
+        for k in range(48):
             im = imgs[k % len(imgs)].astype(np.float32) / 255.0
             y = rng.integers(0, im.shape[0] - T); x = rng.integers(0, im.shape[1] - T)
             yield [im[y:y + T, x:x + T, :3][None]]
 
+    open("prozoom_x4_f32.tflite", "wb").write(tf.lite.TFLiteConverter.from_concrete_functions([conc]).convert())
+    print("float model written", flush=True)
     q = tf.lite.TFLiteConverter.from_concrete_functions([conc])
     q.optimizations = [tf.lite.Optimize.DEFAULT]
     q.representative_dataset = rep
@@ -75,5 +77,4 @@ if __name__ == "__main__":
     q.inference_input_type = tf.uint8
     q.inference_output_type = tf.uint8
     open("prozoom_x4_int8.tflite", "wb").write(q.convert())
-    open("prozoom_x4_f32.tflite", "wb").write(tf.lite.TFLiteConverter.from_concrete_functions([conc]).convert())
     print("built, strength", s)
