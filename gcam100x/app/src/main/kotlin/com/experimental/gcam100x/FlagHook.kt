@@ -32,6 +32,10 @@ class FlagHook(private val module: MainHook) {
             "camera.enable_centaur_chip_in_app_flow",
             "camera.enable_boba_jelly",
             "camera.boba_jelly_eligible",
+            // Beyond-HAL-limit zoom: viewfinder extension and extended level
+            // (boba_jelly_ext_level = 120). Both are false on this phone.
+            "camera.enable_boba_jelly_vfe",
+            "camera.boba_jelly_ext",
         )
 
         /** Numeric flags to override (value type and Optional wrapping are preserved). */
