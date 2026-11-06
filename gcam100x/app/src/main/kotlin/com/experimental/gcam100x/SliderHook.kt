@@ -15,7 +15,8 @@ import java.util.Collections
  * and tmu.a() is the Pro Zoom level (camera.boba_jelly_level = 100).
  *
  * This hook:
- *  - raises vgq.c() results of ~30 to 100 (rear logical camera max),
+ *  - leaves vgq.c() (real max, 30) alone: kkp.f() takes the Pro Zoom branch
+ *    only when tmu.a() > vgq.c() and kkp.j() is true,
  *  - raises tmu.a() to at least 100,
  *  - logs kmd's inputs and replaces a ~30 cap in list[2] with 100.
  */
@@ -32,13 +33,34 @@ class SliderHook(private val module: MainHook) {
 
     fun install(param: XposedModuleInterface.PackageLoadedParam) {
         val loader = param.defaultClassLoader
-        hookFloat(loader, "vgq", "c") { v -> if (v in 29.5f..30.5f) TARGET else v }
         hookFloat(loader, "tmu", "a") { v -> maxOf(v, TARGET) }
         // kkp.a() builds the zoom stops; it only adds the Pro Zoom level when
         // kkp.v (a "Pro Zoom UI active" observable) is true. kmd reads the same
         // observable as ub.i. Wrap both so d() reports true.
         try {
             val kkp = loader.loadClass("kkp")
+            // kkp.j() = v.d() && mode == PHOTO && back camera. Hook it directly:
+            // kkp.f() (zoom config builder) calls it before kkp.a() runs.
+            val jm = kkp.getDeclaredMethod("j")
+            val tbpPhoto = loader.loadClass("tbp").getField("PHOTO").get(null)
+            val lF = kkp.getDeclaredField("l").apply { isAccessible = true }
+            val mF = kkp.getDeclaredField("m").apply { isAccessible = true }
+            val urt = loader.loadClass("urt")
+            val dM = urt.getMethod("d")
+            val jutB = loader.loadClass("jut").getMethod("b")
+            module.hookMethod(jm).intercept { chain ->
+                val orig = chain.proceed() as Boolean
+                if (orig) return@intercept true
+                val forced = try {
+                    val mode = dM.invoke(lF.get(chain.thisObject))
+                    val back = jutB.invoke(dM.invoke(mF.get(chain.thisObject))) as Boolean
+                    mode == tbpPhoto && back
+                } catch (t: Throwable) {
+                    once("jerr", "kkp.j() eval failed: $t"); false
+                }
+                if (forced) once("jforced", "Pro Zoom slider gate kkp.j(): false -> true (photo, back camera)")
+                forced
+            }
             for (m in kkp.declaredMethods) {
                 if (m.name != "a" || m.parameterTypes.isNotEmpty() || m.returnType != java.util.List::class.java) continue
                 module.hookMethod(m).intercept { chain ->

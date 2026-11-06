@@ -46,10 +46,12 @@ class ZoomHook(private val module: MainHook) {
     private var lastLoggedRequestZoom: Float? = null
 
     fun install() {
-        runStep("CameraCharacteristics.get") { hookCharacteristicsGet() }
+        // Do NOT raise the reported zoom range: Google Camera only enables the
+        // Pro Zoom slider path when the Pro Zoom level (100) is greater than
+        // the camera's real max zoom (30). Faking 100 disables it.
         runStep("CameraManager.getCameraCharacteristics") { hookCameraManager() }
         runStep("CaptureRequest.Builder.set") { hookCaptureRequestBuilder() }
-        info("Hooks installed. Target max zoom: ${TARGET_ZOOM}x (rear cameras only)")
+        info("Zoom diagnostics installed (camera metadata left unmodified)")
     }
 
     private fun runStep(name: String, block: () -> Unit) {
