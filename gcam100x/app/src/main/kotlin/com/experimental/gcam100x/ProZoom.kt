@@ -335,7 +335,7 @@ object ProZoom {
     fun register(ctx: Context) {
         if (appContext != null) return
         appContext = ctx.applicationContext
-        // Pick the TPU/GPU backend while the camera is idle.
+        // Load the upscaler on the GPU while the camera is idle.
         worker.post { runCatching { sr.warmUp() } }
         val cr = ctx.applicationContext.contentResolver
         cr.registerContentObserver(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, true, object : ContentObserver(worker) {

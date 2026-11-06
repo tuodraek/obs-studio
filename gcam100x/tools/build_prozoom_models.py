@@ -7,7 +7,9 @@ result keeps natural texture instead of a painted, over-sharpened look.
 
     python3 build_prozoom_models.py realesr-general-x4v3.pth realesr-general-wdn-x4v3.pth [strength]
 
-Outputs (static 1x256x256x3 input, x4 output):
+Outputs (static 1x256x256x3 input, x4 output). The app ships only the float
+model: int8 degrades this network badly (detail residual correlation ~0.56),
+so the int8 build is kept for reference only.
   prozoom_x4_int8.tflite  full-integer (uint8 I/O) for the Edge TPU via NNAPI;
                           outputs the x4 detail residual only (app adds the
                           nearest-upsampled input)

@@ -4,7 +4,6 @@ import android.graphics.Bitmap
 import android.util.Log
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.GpuDelegate
-import org.tensorflow.lite.nnapi.NnApiDelegate
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -14,8 +13,8 @@ import java.util.zip.ZipFile
  * x4 super-resolution (Real-ESRGAN SRVGGNetCompact x4, general model at
  * denoise strength 0.5; see tools/build_prozoom_models.py) on 256x256 tiles.
  *
- * Backends, fastest first, chosen by a one-tile benchmark at load time:
- *  - Edge TPU through NNAPI ("google-edgetpu"), full-int8 model;
+ * Backends: GPU delegate (float), else CPU (XNNPACK). The Edge TPU is not used:
+ * it runs int8 only, and int8 visibly degrades this network.
  *  - GPU delegate, float model;
  *  - CPU (XNNPACK), float model.
  */
@@ -77,17 +76,11 @@ class SuperRes(private val module: MainHook) {
     private fun ensure(): Backend {
         be?.let { return it }
         loadNatives()
-        val int8 = loadModel("prozoom_x4_int8.tflite")
         val f32 = loadModel("prozoom_x4_f32.tflite")
         val candidates = ArrayList<Pair<Backend, Long>>()
-        runCatching {
-            val d = NnApiDelegate(NnApiDelegate.Options()
-                .setAcceleratorName("google-edgetpu")
-                .setUseNnapiCpu(false)
-                .setExecutionPreference(NnApiDelegate.Options.EXECUTION_PREFERENCE_SUSTAINED_SPEED))
-            Backend("TPU", Interpreter(int8, Interpreter.Options().addDelegate(d)), true, d)
-        }.onFailure { module.logMessage(Log.WARN, TAG, "SuperRes: TPU (NNAPI google-edgetpu) unavailable: $it") }
-            .getOrNull()?.let { b -> bench(b)?.let { candidates += b to it } ?: close(b) }
+        // No Edge TPU backend: this network does not survive int8
+        // quantization (detail residual correlation ~0.56 vs float, visible
+        // 4x4 blocking), and the Edge TPU only runs int8. Quality first.
         runCatching {
             val d = GpuDelegate(GpuDelegate.Options().setPrecisionLossAllowed(true)
                 .setInferencePreference(GpuDelegate.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED))

@@ -25,8 +25,8 @@ Google Camera's save pipeline:
    fine; `Align.kt`, tested in `AlignTest`). If the scene is too flat to
    match, it falls back to the centre.
 2. **Detail.** Real-ESRGAN SRVGGNetCompact x4 (general model, denoise strength
-   0.5; `tools/build_prozoom_models.py`) runs on the Edge TPU through NNAPI
-   (GPU/CPU fallback). It runs at the crop's real detail scale (1/4), the result
+   0.5; `tools/build_prozoom_models.py`) runs on the GPU in float (the Edge TPU runs int8 only, which visibly degrades this
+   network). It runs at the crop's real detail scale (1/4), the result
    is at the crop's native resolution, and only luminance detail is
    applied, so colour, tone and grain stay the photo's own.
 3. Preview stabilization is turned off while Pro Zoom is active, so the

@@ -96,7 +96,7 @@ class SettingsHook(private val module: MainHook) {
             appendLine("  Framing: matched 1:1 to the viewfinder frame at the shutter")
             appendLine("  Preview stabilization above 30×: off (no drift)")
             appendLine("  Detail: Real-ESRGAN x4 general (denoise 0.5), luminance only, native crop resolution")
-            appendLine("    int8 for Edge TPU (NNAPI google-edgetpu), float for GPU/CPU")
+            appendLine("    float on GPU (Edge TPU int8 degrades this model)")
             appendLine("  Backend: ${ProZoom.sr.backend}")
             appendLine("  Tile benchmark: ${ProZoom.sr.benchmark ?: "runs when the camera opens"}")
             appendLine("  Last photo: ${ProZoom.lastResult ?: "none yet"}")
