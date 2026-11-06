@@ -158,9 +158,29 @@ class SliderHook(private val module: MainHook) {
             val tmr = loader.loadClass("tmr")
             val apply = tmr.getDeclaredMethod("apply", Any::class.java)
             val bF = tmr.getDeclaredField("b").apply { isAccessible = true }
+            val aF = tmr.getDeclaredField("a").apply { isAccessible = true }
+            val tmuCls = loader.loadClass("tmu")
+            val thrF = tmuCls.getDeclaredField("b").apply { isAccessible = true }
             module.hookMethod(apply).intercept { chain ->
+                val kind0 = runCatching { bF.getInt(chain.thisObject) }.getOrDefault(-1)
+                // tmr[0]([active, zoom]) -> tnm(active, zoom, active ? threshold/zoom : 1).
+                // "active" stays false on this phone even past the threshold, so the
+                // viewfinder never crops beyond 30x. Derive it from the zoom instead.
+                if (kind0 == 0) {
+                    val tmuObj = aF.get(chain.thisObject)
+                    val list = chain.getArg(0) as? List<*>
+                    if (tmuCls.isInstance(tmuObj) && list != null && list.size >= 2 && list[0] == false) {
+                        val zoom = (list[1] as? Float)
+                        val thr = thrF.getFloat(tmuObj)
+                        if (zoom != null && thr > 0f && zoom > thr) {
+                            val copy = ArrayList<Any?>(list); copy[0] = true
+                            once("activeforced", "Pro Zoom viewfinder: active false -> true at ${zoom}x (threshold $thr)")
+                            return@intercept chain.proceed(arrayOf(copy))
+                        }
+                    }
+                }
                 val r = chain.proceed()
-                val kind = runCatching { bF.getInt(chain.thisObject) }.getOrDefault(-1)
+                val kind = kind0
                 if (kind == 0 || kind == 1) {
                     val inp = chain.getArg(0).toString()
                     if (inp.contains(Regex("\\b(2[5-9]|[3-9][0-9]|100)\\."))) once("tmr$kind:$inp:$r", "tmr[$kind]($inp) = $r")
