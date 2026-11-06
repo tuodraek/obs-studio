@@ -34,11 +34,35 @@ class SliderHook(private val module: MainHook) {
         val loader = param.defaultClassLoader
         hookFloat(loader, "vgq", "c") { v -> if (v in 29.5f..30.5f) TARGET else v }
         hookFloat(loader, "tmu", "a") { v -> maxOf(v, TARGET) }
+        // kkp.a() builds the zoom stops; it only adds the Pro Zoom level when
+        // kkp.v (a "Pro Zoom UI active" observable) is true. kmd reads the same
+        // observable as ub.i. Wrap both so d() reports true.
+        try {
+            val kkp = loader.loadClass("kkp")
+            for (m in kkp.declaredMethods) {
+                if (m.name != "a" || m.parameterTypes.isNotEmpty() || m.returnType != java.util.List::class.java) continue
+                module.hookMethod(m).intercept { chain ->
+                    forceTrue(loader, chain.thisObject, "v")
+                    val r = chain.proceed()
+                    once("kkp.a:$r", "Zoom stops: $r")
+                    r
+                }
+            }
+        } catch (t: Throwable) {
+            module.logMessage(Log.WARN, TAG, "kkp hook failed: $t")
+        }
         try {
             val kmd = loader.loadClass("kmd")
             for (m in kmd.declaredMethods) {
                 if (m.name != "a" || m.parameterTypes.size != 2 || m.parameterTypes[0] != Any::class.java) continue
                 module.hookMethod(m).intercept { chain ->
+                    try {
+                        val kmo = chain.thisObject.javaClass.getDeclaredField("a").apply { isAccessible = true }.get(chain.thisObject)
+                        val ub = kmo?.javaClass?.getDeclaredField("ai")?.apply { isAccessible = true }?.get(kmo)
+                        if (ub != null) forceTrue(loader, ub, "i")
+                    } catch (t: Throwable) {
+                        once("kmdwrap", "kmd ub.i wrap failed: $t")
+                    }
                     val list = chain.getArg(0) as? List<*>
                     if (list != null && list.size >= 3) {
                         once("kmd:${list.drop(1)}", "Slider input: f=${list.getOrNull(1)} cap=${list.getOrNull(2)} config=${list[0]?.toString()?.take(300)}")
@@ -56,6 +80,28 @@ class SliderHook(private val module: MainHook) {
         } catch (t: Throwable) {
             module.logMessage(Log.WARN, TAG, "kmd hook failed: $t")
         }
+    }
+
+    /** Replaces obj.<field> (a urt observable) with a proxy whose d() returns true. */
+    private fun forceTrue(loader: ClassLoader, obj: Any?, field: String) {
+        if (obj == null) return
+        val f = obj.javaClass.getDeclaredField(field).apply { isAccessible = true }
+        val cur = f.get(obj) ?: return
+        if (java.lang.reflect.Proxy.isProxyClass(cur.javaClass)) return
+        val urt = loader.loadClass("urt")
+        if (!urt.isInstance(cur)) { once("nourt$field", "${obj.javaClass.name}.$field is ${cur.javaClass.name}, not urt"); return }
+        val orig = runCatching { urt.getMethod("d").invoke(cur) }.getOrNull()
+        val proxy = java.lang.reflect.Proxy.newProxyInstance(loader, arrayOf(urt)) { _, m, args ->
+            if (m.name == "d" && (args == null || args.isEmpty())) java.lang.Boolean.TRUE
+            else m.invoke(cur, *(args ?: emptyArray()))
+        }
+        try {
+            f.set(obj, proxy)
+        } catch (t: Throwable) {
+            // final field: use Unsafe-free fallback via accessible Field already set; report.
+            once("setfail$field", "Cannot replace ${obj.javaClass.name}.$field: $t"); return
+        }
+        once("wrap${obj.javaClass.name}.$field", "Forced ${obj.javaClass.name}.$field (Pro Zoom UI gate) true; original=$orig")
     }
 
     private fun hookFloat(loader: ClassLoader, cls: String, name: String, f: (Float) -> Float) {
