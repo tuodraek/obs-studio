@@ -193,6 +193,7 @@ class SliderHook(private val module: MainHook) {
             module.hookCtor(ctor).intercept { chain ->
                 val live = lastActiveTnm
                 val cur = chain.getArg(idx)
+                module.logMessage(Log.INFO, TAG, "Shot created: Pro Zoom state on shot = $cur (live active = $live)")
                 if (live != null && cur !== live) {
                     val args = Array<Any?>(ctor.parameterTypes.size) { chain.getArg(it) }
                     args[idx] = live
@@ -215,6 +216,20 @@ class SliderHook(private val module: MainHook) {
                         }
                     }
                 }
+                if (m.name == "j" && m.parameterTypes.size == 1) {
+                    module.hookMethod(m).intercept { chain ->
+                        module.logMessage(Log.INFO, TAG, "Pro Zoom processor got CENTAUR session (tna.j): ${chain.getArg(0)?.javaClass?.name}")
+                        try { chain.proceed() } catch (t: Throwable) {
+                            module.logMessage(Log.WARN, TAG, "tna.j threw ${Log.getStackTraceString(t)}"); throw t
+                        }
+                    }
+                }
+                if (m.name == "a" && m.parameterTypes.size == 2 && m.parameterTypes[0] == java.lang.Long.TYPE) {
+                    module.hookMethod(m).intercept { chain ->
+                        module.logMessage(Log.INFO, TAG, "tna.a(shot=${chain.getArg(0)}) result")
+                        chain.proceed()
+                    }
+                }
                 if (m.name == "i" && m.parameterTypes.isEmpty()) {
                     module.hookMethod(m).intercept { chain ->
                         module.logMessage(Log.INFO, TAG, "Pro Zoom processor init (tna.i)")
@@ -225,6 +240,19 @@ class SliderHook(private val module: MainHook) {
                 }
             }
         }.onFailure { module.logMessage(Log.WARN, TAG, "tna hook failed: $it") }
+        runCatching {
+            // Photo capture session type (rce): CENTAUR for Pro Zoom shots.
+            val rbb = loader.loadClass("rbb")
+            val rce = loader.loadClass("rce")
+            for (c in rbb.declaredConstructors) {
+                val ri = c.parameterTypes.indexOf(rce)
+                if (ri < 0) continue
+                module.hookCtor(c).intercept { chain ->
+                    module.logMessage(Log.INFO, TAG, "Capture session type: ${chain.getArg(ri)}")
+                    chain.proceed()
+                }
+            }
+        }.onFailure { module.logMessage(Log.WARN, TAG, "rbb hook failed: $it") }
         runCatching {
             // Fusion mode selection result per shot.
             val myh = loader.loadClass("myh")
