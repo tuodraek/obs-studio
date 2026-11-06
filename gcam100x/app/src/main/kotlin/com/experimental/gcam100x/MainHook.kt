@@ -31,6 +31,7 @@ class MainHook : XposedModule() {
     }
 
     fun hookMethod(method: Method) = hook(method)
+    fun hookCtor(c: java.lang.reflect.Constructor<*>) = hook(c)
 
     /** LSPosed/Vector mirrors module logs to logcat under the same tag. */
     @Volatile private var logFile: java.io.File? = null

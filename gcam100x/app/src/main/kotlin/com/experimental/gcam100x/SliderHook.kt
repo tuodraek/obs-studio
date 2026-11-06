@@ -34,6 +34,7 @@ class SliderHook(private val module: MainHook) {
     fun install(param: XposedModuleInterface.PackageLoadedParam) {
         val loader = param.defaultClassLoader
         hookFloat(loader, "tmu", "a") { v -> maxOf(v, TARGET) }
+        hookViewfinderDiag(loader)
         // kkp.a() builds the zoom stops; it only adds the Pro Zoom level when
         // kkp.v (a "Pro Zoom UI active" observable) is true. kmd reads the same
         // observable as ub.i. Wrap both so d() reports true.
@@ -125,6 +126,48 @@ class SliderHook(private val module: MainHook) {
             once("setfail$field", "Cannot replace ${obj.javaClass.name}.$field: $t"); return
         }
         once("wrap${obj.javaClass.name}.$field", "Forced ${obj.javaClass.name}.$field (Pro Zoom UI gate) true; original=$orig")
+    }
+
+    /** Diagnostics for the beyond-30x viewfinder path. */
+    private fun hookViewfinderDiag(loader: ClassLoader) {
+        // tnm(active, zoom, previewScale): previewScale = threshold/zoom when active.
+        runCatching {
+            val tnm = loader.loadClass("tnm")
+            val ctor = tnm.getDeclaredConstructor(java.lang.Boolean.TYPE, java.lang.Float.TYPE, java.lang.Float.TYPE)
+            var last = ""
+            module.hookCtor(ctor).intercept { chain ->
+                val r = chain.proceed()
+                val desc = "active=${chain.getArg(0)} zoom=${chain.getArg(1)} scale=${chain.getArg(2)}"
+                val zoom = (chain.getArg(1) as? Float) ?: 0f
+                if (zoom >= 20f && desc != last) { last = desc; module.logMessage(Log.INFO, TAG, "Pro Zoom state: $desc") }
+                r
+            }
+        }.onFailure { module.logMessage(Log.WARN, TAG, "tnm diag failed: $it") }
+        // thc = viewfinder-extension component (created only if Pro Zoom + VFE enabled).
+        runCatching {
+            val thc = loader.loadClass("thc")
+            for (c in thc.declaredConstructors) {
+                module.hookCtor(c).intercept { chain ->
+                    once("thc", "Viewfinder extension (thc) created")
+                    chain.proceed()
+                }
+            }
+        }.onFailure { module.logMessage(Log.WARN, TAG, "thc diag failed: $it") }
+        // tmr.apply: case 1 = (zoom >= threshold), case 0 builds tnm.
+        runCatching {
+            val tmr = loader.loadClass("tmr")
+            val apply = tmr.getDeclaredMethod("apply", Any::class.java)
+            val bF = tmr.getDeclaredField("b").apply { isAccessible = true }
+            module.hookMethod(apply).intercept { chain ->
+                val r = chain.proceed()
+                val kind = runCatching { bF.getInt(chain.thisObject) }.getOrDefault(-1)
+                if (kind == 0 || kind == 1) {
+                    val inp = chain.getArg(0).toString()
+                    if (inp.contains(Regex("\\b(2[5-9]|[3-9][0-9]|100)\\."))) once("tmr$kind:$inp:$r", "tmr[$kind]($inp) = $r")
+                }
+                r
+            }
+        }.onFailure { module.logMessage(Log.WARN, TAG, "tmr diag failed: $it") }
     }
 
     private fun hookFloat(loader: ClassLoader, cls: String, name: String, f: (Float) -> Float) {
