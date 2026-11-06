@@ -178,6 +178,8 @@ class SliderHook(private val module: MainHook) {
     }
 
     @Volatile private var lastActiveTnm: Any? = null
+    /** Set while this module builds its own tnm (not a viewfinder state change). */
+    private val building = ThreadLocal.withInitial { false }
     @Volatile private var lastZoom = 0f
     @Volatile private var lastZoomTime = 0L
 
@@ -193,6 +195,7 @@ class SliderHook(private val module: MainHook) {
             val tnm = loader.loadClass("tnm")
             val ctor = pcl.declaredConstructors.first { it.parameterTypes.size == 18 }
             val idx = ctor.parameterTypes.indexOf(tnm)
+            val tnmCtor = tnm.getDeclaredConstructor(java.lang.Boolean.TYPE, java.lang.Float.TYPE, java.lang.Float.TYPE).apply { isAccessible = true }
             module.hookCtor(ctor).intercept { chain ->
                 val live = lastActiveTnm
                 val cur = chain.getArg(idx)
@@ -207,11 +210,25 @@ class SliderHook(private val module: MainHook) {
                         else if (lastZoom > 30f && System.currentTimeMillis() - lastZoomTime < 5000) ProZoom.onShot(30f / lastZoom, lastZoom)
                     }
                 }
-                if (live != null && cur !== live) {
-                    val args = Array<Any?>(ctor.parameterTypes.size) { chain.getArg(it) }
-                    args[idx] = live
-                    module.logMessage(Log.INFO, TAG, "Shot: attaching Pro Zoom state $live (was $cur)")
-                    return@intercept chain.proceed(args)
+                // Keep the still on Google Camera's normal 30x HDR+ / Night Sight
+                // path. An active tnm makes it a CENTAUR session, whose output
+                // is the raw burst merge meant for Google's Pro Zoom model
+                // (which cannot run here): noisy and unfinished. Pro Zoom is
+                // applied to the finished photo in the save pipeline instead.
+                val shotTnm = live ?: cur
+                val active = shotTnm != null && runCatching { tnm.getDeclaredField("b").getBoolean(shotTnm) }.getOrDefault(false)
+                if (active) {
+                    val z = tnm.getDeclaredField("c").getFloat(shotTnm)
+                    val plain = runCatching {
+                        building.set(true)
+                        try { tnmCtor.newInstance(false, z, 1f) } finally { building.set(false) }
+                    }.onFailure { module.logMessage(Log.WARN, TAG, "Shot: cannot build inactive tnm: $it") }.getOrNull()
+                    if (plain != null) {
+                        val args = Array<Any?>(ctor.parameterTypes.size) { chain.getArg(it) }
+                        args[idx] = plain
+                        module.logMessage(Log.INFO, TAG, "Shot: normal HDR+ capture at 30x; Pro Zoom ${z}x applied on save")
+                        return@intercept chain.proceed(args)
+                    }
                 }
                 chain.proceed()
             }
@@ -231,7 +248,12 @@ class SliderHook(private val module: MainHook) {
                 }
                 if (m.name == "j" && m.parameterTypes.size == 1) {
                     module.hookMethod(m).intercept { chain ->
-                        module.logMessage(Log.INFO, TAG, "Pro Zoom processor got CENTAUR session (tna.j): ${chain.getArg(0)?.javaClass?.name}")
+                        // The shot is a normal HDR+ capture now (see pcl hook);
+                        // Google's Pro Zoom processor has no model to run here.
+                        if (m.returnType == Void.TYPE) {
+                            module.logMessage(Log.INFO, TAG, "Pro Zoom processor tna.j skipped (normal HDR+ shot)")
+                            return@intercept null
+                        }
                         try { chain.proceed() } catch (t: Throwable) {
                             module.logMessage(Log.WARN, TAG, "tna.j threw ${Log.getStackTraceString(t)}"); throw t
                         }
@@ -291,6 +313,7 @@ class SliderHook(private val module: MainHook) {
             val ctor = tnm.getDeclaredConstructor(java.lang.Boolean.TYPE, java.lang.Float.TYPE, java.lang.Float.TYPE)
             var last = ""
             module.hookCtor(ctor).intercept { chain ->
+                if (building.get() == true) return@intercept chain.proceed()
                 val r = chain.proceed()
                 (chain.getArg(1) as? Float)?.let { z -> if (z > 0f) { lastZoom = z; lastZoomTime = System.currentTimeMillis() } }
                 ProZoom.liveScale = if (chain.getArg(0) == true) ((chain.getArg(2) as? Float) ?: 1f) else 1f

@@ -52,6 +52,8 @@ object ProZoom {
         @Volatile var view: Align.View? = null
         @Volatile var thumbIn: Bitmap? = null
         @Volatile var thumbOut: Bitmap? = null
+        /** The finished photo has been written. */
+        @Volatile var done = false
     }
 
     private val shots = ConcurrentLinkedQueue<Shot>()
@@ -113,6 +115,7 @@ object ProZoom {
                 ProZoomStream(out, cr, uri, shot)
             }
             log("ProZoom: save-pipeline hook on vnn.g()")
+            hookThumbnailView(loader)
         }.onFailure { module.logMessage(Log.WARN, TAG, "ProZoom: vnn hook failed: $it") }
         // Shot thumbnail. Google Camera hands it out in two places:
         //  - rbl.g(shot, bitmap, rotation): dispatched straight to every shot
@@ -165,6 +168,46 @@ object ProZoom {
             }
             log("ProZoom: viewfinder screenshot hook on swj")
         }.onFailure { module.logMessage(Log.WARN, TAG, "ProZoom: thumbnail hook failed: $it") }
+    }
+
+    /**
+     * True if [bmp] shows the full 30x frame rather than the Pro Zoom view
+     * (its centre crop matches the viewfinder better than the whole image).
+     * Null when there is nothing to compare against.
+     */
+    private fun looksUnzoomed(bmp: Bitmap, shot: Shot): Boolean? {
+        val v = viewFor(shot) ?: return null
+        val g = Align.gray(bmp, 160)
+        val whole = Align.similarity(g, v.gray)
+        val centre = Align.similarity(Align.crop(g, shot.scale), v.gray)
+        return centre > whole + 0.05f
+    }
+
+    /** The last place a thumbnail is drawn: bottom-bar ThumbnailView.b(bitmap, ...). */
+    private fun hookThumbnailView(loader: ClassLoader) {
+        runCatching {
+            val tv = loader.loadClass("com.google.android.apps.camera.bottombar.ThumbnailView")
+            val b = tv.declaredMethods.first { it.name == "b" && it.parameterTypes.size == 4 && it.parameterTypes[0] == Bitmap::class.java }
+            module.hookMethod(b).intercept { chain ->
+                val bmp = chain.getArg(0) as? Bitmap
+                val shot = last?.takeIf { !it.done && System.currentTimeMillis() - it.time < 30_000 }
+                if (bmp == null || bmp.isRecycled || shot == null || ours.containsKey(bmp)) return@intercept chain.proceed()
+                val unzoomed = runCatching { looksUnzoomed(bmp, shot) }.getOrNull()
+                if (unzoomed != true) {
+                    log("ProZoom: thumbnail view ${bmp.width}x${bmp.height} already Pro Zoom (check=$unzoomed)")
+                    return@intercept chain.proceed()
+                }
+                val w = bmp.width; val h = bmp.height
+                val (r, how) = frame(w, h, shot, bmp)
+                val crop = Bitmap.createBitmap(bmp, r.left, r.top, r.width().coerceAtLeast(2), r.height().coerceAtLeast(2))
+                val scaled = Bitmap.createScaledBitmap(crop, w, h, true)
+                if (crop !== bmp && crop !== scaled) crop.recycle()
+                ours[scaled] = true
+                log("ProZoom: thumbnail view got the 30x image ${w}x$h; framed to ${shot.zoom}x ($how)")
+                chain.proceed(arrayOf(scaled, chain.getArg(1), chain.getArg(2), chain.getArg(3)))
+            }
+            log("ProZoom: thumbnail view hook on ThumbnailView.b()")
+        }.onFailure { module.logMessage(Log.WARN, TAG, "ProZoom: ThumbnailView hook failed: $it") }
     }
 
     /** Bitmaps this module produced (already Pro Zoom framed). */
@@ -228,6 +271,7 @@ object ProZoom {
             } finally {
                 target.close()
             }
+            shot.done = true
             fixedIds.add(runCatching { ContentUris.parseId(uri) }.getOrDefault(-1))
         }
     }

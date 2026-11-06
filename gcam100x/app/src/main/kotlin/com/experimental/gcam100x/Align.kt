@@ -187,4 +187,24 @@ object Align {
         val (tw, th) = tplSize(lv, rot, s)
         return Match((x + tw / 2f) / g.w, (y + th / 2f) / g.h, s, rot, b[4])
     }
+
+    /** Crop of [g] (normalised centre/size). */
+    fun crop(g: Gray, scale: Float): Gray {
+        val w = max(4, (g.w * scale).roundToInt()); val h = max(4, (g.h * scale).roundToInt())
+        val x0 = (g.w - w) / 2; val y0 = (g.h - h) / 2
+        return Gray(w, h, FloatArray(w * h) { g[x0 + it % w, y0 + it / w] })
+    }
+
+    /** Best NCC between [a] and [b] (any rotation), both resampled to 32x32. */
+    fun similarity(a: Gray, b: Gray): Float {
+        val ta = template(a, 32, 32) ?: return 0f
+        var best = -1f
+        for (r in intArrayOf(0, 90, 180, 270)) {
+            val tb = template(rotate(b, r), 32, 32) ?: return 0f
+            var d = 0f
+            for (k in ta.indices) d += ta[k] * tb[k]
+            if (d > best) best = d
+        }
+        return best
+    }
 }

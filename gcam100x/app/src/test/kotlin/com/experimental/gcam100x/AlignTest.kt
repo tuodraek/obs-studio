@@ -71,4 +71,15 @@ class AlignTest {
         val view = Align.Gray(384, 288, FloatArray(384 * 288) { 0.5f })
         assertNull(Align.locate(still, view, 0.3f))
     }
+
+    @Test fun tellsZoomedFromUnzoomedThumbnail() {
+        val scene = Scene(11)
+        val scale = 0.3f
+        val view = render(scene, 384, 288, 0.35, 0.35, 0.3, 0.3, 3) { it }
+        val unzoomed = render(scene, 160, 120, 0.0, 0.0, 1.0, 1.0, 2) { 0.2 + 0.7 * it }
+        val zoomed = render(scene, 160, 120, 0.35, 0.35, 0.3, 0.3, 2) { 0.2 + 0.7 * it }
+        fun check(g: Align.Gray) = Align.similarity(Align.crop(g, scale), view) > Align.similarity(g, view) + 0.05f
+        org.junit.Assert.assertTrue(check(unzoomed))
+        org.junit.Assert.assertFalse(check(zoomed))
+    }
 }
