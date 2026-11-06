@@ -35,9 +35,10 @@ class SettingsHook(private val module: MainHook) {
     fun install(param: XposedModuleInterface.PackageLoadedParam) {
         val loader = param.defaultClassLoader
         runCatching {
-            val gcm = loader.loadClass("gcm")
+            // gcm.ap() is an abstract-like stub; Google Camera's settings
+            // fragment hjv (extends gcm) implements it.
             val screenCls = loader.loadClass("androidx.preference.PreferenceScreen")
-            val ap = gcm.getDeclaredMethod("ap", screenCls)
+            val ap = loader.loadClass("hjv").getDeclaredMethod("ap", screenCls)
             module.hookMethod(ap).intercept { chain ->
                 val r = chain.proceed()
                 val screen = chain.getArg(0)
@@ -45,7 +46,7 @@ class SettingsHook(private val module: MainHook) {
                     .onFailure { module.logMessage(Log.WARN, TAG, "Settings entry failed: $it") }
                 r
             }
-            module.logMessage(Log.INFO, TAG, "Settings hook on gcm.ap()")
+            module.logMessage(Log.INFO, TAG, "Settings hook on hjv.ap()")
         }.onFailure { module.logMessage(Log.WARN, TAG, "Settings hook failed: $it") }
     }
 
@@ -57,7 +58,8 @@ class SettingsHook(private val module: MainHook) {
         var activity = runCatching { prefBase.getField("j").get(screen) }.getOrNull()
         while (activity is android.content.ContextWrapper && activity !is android.app.Activity) activity = activity.baseContext
         val actName = activity?.javaClass?.name ?: ""
-        if (!actName.endsWith("CameraGm3SettingsActivity")) return
+        module.logMessage(Log.INFO, TAG, "Settings: screen shown in $actName")
+        if (!actName.contains("Settings")) return
         if (added.containsKey(activity)) return
         added[activity!!] = true
 
@@ -117,6 +119,11 @@ class SettingsHook(private val module: MainHook) {
             .setView(ScrollView(ctx).apply { addView(tv) })
             .setPositiveButton("Close", null)
             .setNeutralButton("Copy log") { _, _ -> copyLog(ctx, text) }
+            .setNegativeButton(if (Prefs.toastEnabled(ctx)) "Disable toast" else "Enable toast") { _, _ ->
+                val on = !Prefs.toastEnabled(ctx)
+                Prefs.setToastEnabled(ctx, on)
+                Toast.makeText(ctx, "GCam100x startup toast ${if (on) "enabled" else "disabled"}", Toast.LENGTH_SHORT).show()
+            }
             .show()
     }
 

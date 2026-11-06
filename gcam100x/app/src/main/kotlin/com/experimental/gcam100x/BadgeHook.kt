@@ -30,6 +30,9 @@ class BadgeHook(private val module: MainHook) {
                     if (f != null) module.attachLogFile(f)
                     val err = module.lastError
                     if (err != null) module.logMessage(Log.WARN, "GCam100x", "Log file error: $err")
+                    if (Prefs.toastEnabled(act)) runCatching {
+                        Toast.makeText(act, "$badge active", Toast.LENGTH_SHORT).show()
+                    }
                 }
                 r
             }
