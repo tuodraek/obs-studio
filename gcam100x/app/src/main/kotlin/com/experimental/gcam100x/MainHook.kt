@@ -25,6 +25,7 @@ class MainHook : XposedModule() {
         }
         logMessage(Log.INFO, TAG, "GCam100x ${BuildConfig.VERSION_NAME} starting in ${param.packageName}")
         ManifestHook(this).install(param)
+        BadgeHook(this).install(param)
         VersionHook(this).install(param)
         DiagHook(this).install()
         FlagHook(this).install(param)
