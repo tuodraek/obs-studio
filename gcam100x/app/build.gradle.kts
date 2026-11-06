@@ -1,5 +1,4 @@
 import java.net.URI
-import java.util.zip.ZipFile
 
 plugins {
     alias(libs.plugins.android.application)
@@ -44,21 +43,16 @@ dependencies {
     implementation("com.google.ai.edge.litert:litert-gpu-api:1.4.2")
 }
 
-// Real-ESRGAN-x4plus (BSD-3-Clause), TFLite build from Qualcomm AI Hub.
-// Downloaded at build time; not stored in git.
-val esrganModel = layout.projectDirectory.file("src/main/assets/real_esrgan_x4plus.tflite")
+// Real-ESRGAN realesr-general-x4v3 (BSD-3-Clause, xinntao/Real-ESRGAN),
+// TFLite conversion. Downloaded at build time; not stored in git.
+val esrganModel = layout.projectDirectory.file("src/main/assets/realesr_general_x4v3.tflite")
 val fetchEsrgan by tasks.registering {
     outputs.file(esrganModel)
     onlyIf { !esrganModel.asFile.exists() }
     doLast {
-        val zipUrl = "https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-models/models/real_esrgan_x4plus/releases/v0.66.0/real_esrgan_x4plus-tflite-float.zip"
-        val tmp = File(temporaryDir, "esrgan.zip")
-        URI(zipUrl).toURL().openStream().use { i -> tmp.outputStream().use { i.copyTo(it) } }
-        ZipFile(tmp).use { z ->
-            val e = z.entries().asSequence().first { it.name.endsWith(".tflite") }
-            esrganModel.asFile.parentFile.mkdirs()
-            z.getInputStream(e).use { i -> esrganModel.asFile.outputStream().use { i.copyTo(it) } }
-        }
+        val url = "https://huggingface.co/JoPmt/Real_Esrgan_x2_Onnx_Tflite_Tfjs/resolve/main/ano_test/realesr-general-x4v3_float32.tflite"
+        esrganModel.asFile.parentFile.mkdirs()
+        URI(url).toURL().openStream().use { i -> esrganModel.asFile.outputStream().use { i.copyTo(it) } }
     }
 }
 tasks.named("preBuild") { dependsOn(fetchEsrgan) }

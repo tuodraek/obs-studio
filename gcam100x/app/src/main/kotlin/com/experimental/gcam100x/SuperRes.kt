@@ -12,18 +12,18 @@ import java.nio.ByteOrder
 import java.util.zip.ZipFile
 
 /**
- * Real-ESRGAN-x4plus super-resolution (TFLite, GPU delegate with CPU
- * fallback). The model takes 128x128 RGB tiles in [0,1] and returns
- * 512x512 tiles. Tiles overlap by [PAD] input pixels to hide seams.
+ * Real-ESRGAN (realesr-general-x4v3, compact) super-resolution (TFLite, GPU delegate with CPU
+ * fallback). The model is run on 256x256 RGB tiles in [0,1] and returns
+ * 1024x1024 tiles. Tiles overlap by [PAD] input pixels to hide seams.
  */
 class SuperRes(private val module: MainHook) {
     companion object {
         private const val TAG = "GCam100x"
-        private const val TILE = 128
-        private const val PAD = 8
+        private const val TILE = 256
+        private const val PAD = 12
         private const val CORE = TILE - 2 * PAD
         private const val SCALE = 4
-        private const val MODEL = "assets/real_esrgan_x4plus.tflite"
+        private const val MODEL = "assets/realesr_general_x4v3.tflite"
     }
 
     private var interpreter: Interpreter? = null
@@ -58,10 +58,15 @@ class SuperRes(private val module: MainHook) {
             gpu?.close(); gpu = null
             Interpreter(buf, Interpreter.Options().setNumThreads(3).setUseXNNPACK(true)).also { backend = "CPU" }
         }
+        it.resizeInput(0, intArrayOf(1, TILE, TILE, 3))
+        it.allocateTensors()
         interpreter = it
-        module.logMessage(Log.INFO, TAG, "SuperRes: Real-ESRGAN x4 loaded ($backend)")
+        module.logMessage(Log.INFO, TAG, "SuperRes: realesr-general-x4v3 loaded ($backend)")
         return it
     }
+
+    /** Loads the model (and compiles the GPU program) ahead of the first photo. */
+    fun warmUp() { ensure() }
 
     /** Returns a bitmap 4x the size of [src]. */
     fun upscale4x(src: Bitmap, onProgress: (Int, Int) -> Unit = { _, _ -> }): Bitmap {
