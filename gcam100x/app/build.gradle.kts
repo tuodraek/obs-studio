@@ -40,7 +40,8 @@ dependencies {
     implementation("com.google.ai.edge.litert:litert:1.4.2")
     implementation("com.google.ai.edge.litert:litert-gpu:1.4.2")
     implementation("com.google.ai.edge.litert:litert-gpu-api:1.4.2")
+    testImplementation("junit:junit:4.13.2")
 }
 
-// Pro Zoom upscaler models: app/src/main/assets/prozoom_x4_*.tflite (see tools/convert_x4v3.py).
+// Pro Zoom upscaler models: app/src/main/assets/prozoom_x4_*.tflite (see tools/build_prozoom_models.py).
 

@@ -35,13 +35,21 @@ import java.util.concurrent.ConcurrentLinkedQueue
  */
 object ProZoom {
     private const val TAG = "GCam100x"
-    /** At or above this zoom the crop is rebuilt with Real-ESRGAN; below it a high-quality resize. */
-    private const val SR_MIN_ZOOM = 40f
+    /** Network input = crop / this (the crop's real detail scale at 30x+ zoom). */
+    private const val SR_IN_DIV = 4
+    /** Longest network input side (bounds the time at low Pro Zoom levels). */
+    private const val SR_IN_MAX = 1024
+    /** How much of the network's luminance detail is applied. */
+    private const val DETAIL = 0.8f
+    /** Minimum NCC score to trust the viewfinder match. */
+    private const val MIN_MATCH = 0.5f
 
     class Shot(val scale: Float, val zoom: Float, val time: Long) {
         @Volatile var consumed = false
         /** Google Camera's shot object (rcb) this Pro Zoom shot's thumbnail belongs to. */
         @Volatile var thumbKey: Any? = null
+        /** Viewfinder frame on screen at the shutter. */
+        @Volatile var view: Align.View? = null
     }
 
     private val shots = ConcurrentLinkedQueue<Shot>()
@@ -59,9 +67,10 @@ object ProZoom {
     fun onShot(scale: Float, zoom: Float) {
         if (scale <= 0f || scale >= 0.999f) return
         val s = Shot(scale, zoom, System.currentTimeMillis())
+        s.view = lastView?.takeIf { kotlin.math.abs(it.time - s.time) < 2_500 }
         last = s
         shots.add(s)
-        log("ProZoom: shot at ${zoom}x (scale $scale)")
+        log("ProZoom: shot at ${zoom}x (scale $scale), viewfinder frame ${s.view?.let { "${it.gray.w}x${it.gray.h} captured" } ?: "not yet"}")
         worker.postDelayed({ fallbackScan() }, 20_000)
     }
 
@@ -115,11 +124,12 @@ object ProZoom {
                 if (shot == null) shot = latestShot()?.takeIf { it.thumbKey == null && System.currentTimeMillis() - it.time < 3_000 }?.also { it.thumbKey = key }
                 if (bmp == null || shot == null || bmp.isRecycled) return@intercept chain.proceed()
                 val w = bmp.width; val h = bmp.height
-                val cw = (w * shot.scale).toInt().coerceAtLeast(2); val ch = (h * shot.scale).toInt().coerceAtLeast(2)
-                val crop = Bitmap.createBitmap(bmp, (w - cw) / 2, (h - ch) / 2, cw, ch)
+                // Same 1:1 framing as the final photo.
+                val (r, how) = frame(w, h, shot, bmp)
+                val crop = Bitmap.createBitmap(bmp, r.left, r.top, r.width().coerceAtLeast(2), r.height().coerceAtLeast(2))
                 val scaled = Bitmap.createScaledBitmap(crop, w, h, true)
                 if (crop !== bmp && crop !== scaled) crop.recycle()
-                log("ProZoom: thumbnail ${w}x$h cropped to ${shot.zoom}x")
+                log("ProZoom: thumbnail ${w}x$h cropped to ${shot.zoom}x; framing: $how")
                 chain.proceed(arrayOf(chain.getArg(0), scaled, chain.getArg(2)))
             }
             log("ProZoom: thumbnail hook on rrg.c()")
@@ -137,6 +147,12 @@ object ProZoom {
                 val w = bmp.width; val h = bmp.height
                 val cw = (w * s).toInt().coerceAtLeast(2); val chh = (h * s).toInt().coerceAtLeast(2)
                 val crop = Bitmap.createBitmap(bmp, (w - cw) / 2, (h - chh) / 2, cw, chh)
+                // Exactly what the viewfinder shows: the reference for 1:1 framing.
+                runCatching {
+                    val v = Align.View(Align.gray(crop, 384), System.currentTimeMillis())
+                    lastView = v
+                    last?.takeIf { it.view == null && kotlin.math.abs(v.time - it.time) < 2_500 }?.view = v
+                }
                 val scaled = Bitmap.createScaledBitmap(crop, w, h, true)
                 if (crop !== scaled) crop.recycle()
                 ch.proceed(arrayOf(scaled, ch.getArg(1), ch.getArg(2), ch.getArg(3)))
@@ -186,42 +202,116 @@ object ProZoom {
 
     // --- Rendering -------------------------------------------------------
 
-    /** Crop [jpeg] to the shot's zoom, enhance, re-encode with the original EXIF. */
+    /** Viewfinder frame shown at the most recent shutter (for 1:1 framing). */
+    @Volatile var lastView: Align.View? = null
+
+    private fun viewFor(shot: Shot): Align.View? =
+        shot.view ?: lastView?.takeIf { kotlin.math.abs(it.time - shot.time) < 2_500 }
+
+    /** Crop rectangle of [w]x[h] that matches what the viewfinder showed for [shot]. */
+    private fun frame(w: Int, h: Int, shot: Shot, coarse: Bitmap?): Pair<Rect, String> {
+        val cw0 = w * shot.scale; val ch0 = h * shot.scale
+        var cx = w / 2f; var cy = h / 2f; var s = 1f
+        var how = "centre (no viewfinder frame)"
+        val view = viewFor(shot)
+        if (view != null && coarse != null) {
+            val m = runCatching { Align.locate(Align.gray(coarse, 1024), view.gray, shot.scale) }
+                .onFailure { module.logMessage(Log.WARN, TAG, "ProZoom: align failed: $it") }.getOrNull()
+            if (m != null && m.score >= MIN_MATCH) {
+                cx = m.cx * w; cy = m.cy * h; s = m.scale
+                how = "matched to viewfinder (score %.2f, offset %+.1f%%, %+.1f%% of frame, size x%.3f, rot %d)"
+                    .format(m.score, (m.cx - 0.5f) * 100, (m.cy - 0.5f) * 100, m.scale, m.rot)
+            } else if (m != null) {
+                how = "centre (viewfinder match too weak: %.2f)".format(m.score)
+            } else how = "centre (scene too flat to match)"
+        }
+        val cw = (cw0 * s).toInt().coerceIn(16, w); val ch = (ch0 * s).toInt().coerceIn(16, h)
+        val left = (cx - cw / 2f).toInt().coerceIn(0, w - cw); val top = (cy - ch / 2f).toInt().coerceIn(0, h - ch)
+        return Rect(left, top, left + cw, top + ch) to how
+    }
+
+    /** Area-correct downscale by repeated halving (bilinear alone aliases past 2x). */
+    private fun downscale(src: Bitmap, tw: Int, th: Int): Bitmap {
+        var b = src
+        while (b.width / 2 >= tw && b.height / 2 >= th) {
+            val n = Bitmap.createScaledBitmap(b, b.width / 2, b.height / 2, true)
+            if (b !== src) b.recycle()
+            b = n
+        }
+        val out = if (b.width == tw && b.height == th) b else Bitmap.createScaledBitmap(b, tw, th, true)
+        if (b !== src && b !== out) b.recycle()
+        return out
+    }
+
+    /**
+     * Adds the network's luminance detail onto the real photo: colour, tone
+     * and grain stay the photo's own; only structure comes from the model.
+     */
+    private fun lumaBlend(real: Bitmap, ai: Bitmap, a: Float): Bitmap {
+        val w = real.width; val h = real.height
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val rp = IntArray(w); val ap = IntArray(w)
+        val ai256 = (a * 256).toInt()
+        for (y in 0 until h) {
+            real.getPixels(rp, 0, w, 0, y, w, 1); ai.getPixels(ap, 0, w, 0, y, w, 1)
+            for (x in 0 until w) {
+                val r = rp[x]; val q = ap[x]
+                val yr = (77 * ((r shr 16) and 0xff) + 150 * ((r shr 8) and 0xff) + 29 * (r and 0xff)) shr 8
+                val yq = (77 * ((q shr 16) and 0xff) + 150 * ((q shr 8) and 0xff) + 29 * (q and 0xff)) shr 8
+                val d = ((yq - yr) * ai256) shr 8
+                val rr = (((r shr 16) and 0xff) + d).coerceIn(0, 255)
+                val gg = (((r shr 8) and 0xff) + d).coerceIn(0, 255)
+                val bb = ((r and 0xff) + d).coerceIn(0, 255)
+                rp[x] = (0xff shl 24) or (rr shl 16) or (gg shl 8) or bb
+            }
+            out.setPixels(rp, 0, w, 0, y, w, 1)
+        }
+        return out
+    }
+
+    /** Pro Zoom: frame [jpeg] 1:1 to the viewfinder, rebuild detail, re-encode with the original EXIF. */
     fun render(jpeg: ByteArray, shot: Shot): ByteArray {
         val t0 = System.currentTimeMillis()
         val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, o)
         val w = o.outWidth; val h = o.outHeight
-        val cw = (w * shot.scale).toInt().coerceAtLeast(16); val ch = (h * shot.scale).toInt().coerceAtLeast(16)
-        val left = (w - cw) / 2; val top = (h - ch) / 2
+        // 1. Framing: register the still against the on-screen frame.
+        var sample = 1
+        while (w / (sample * 2) >= 1000) sample *= 2
+        val coarse = if (viewFor(shot) != null)
+            BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, BitmapFactory.Options().apply { inSampleSize = sample }) else null
+        val (rect, how) = frame(w, h, shot, coarse)
+        coarse?.recycle()
+        val t1 = System.currentTimeMillis()
         @Suppress("DEPRECATION")
         val dec = BitmapRegionDecoder.newInstance(jpeg, 0, jpeg.size, false)!!
-        val region = dec.decodeRegion(Rect(left, top, left + cw, top + ch), null)
+        val region = dec.decodeRegion(rect, null)
         dec.recycle()
-        val ctx = appContext
-        val enhance = ctx != null && Prefs.aiEnhance(ctx) && shot.zoom >= SR_MIN_ZOOM
-        val full: Bitmap = if (enhance) {
-            // Network input = the crop at 1/4 of the output size (exact at 120x).
-            val small = if (region.width == w / 4 && region.height == h / 4) region
-                else Bitmap.createScaledBitmap(region, w / 4, h / 4, true).also { region.recycle() }
-            val up = try { sr.upscale4x(small) } catch (t: Throwable) {
-                module.logMessage(Log.WARN, TAG, "ProZoom: enhancement unavailable (${t}); plain crop")
-                Bitmap.createScaledBitmap(small, w, h, true)
-            } finally { small.recycle() }
-            if (up.width == w && up.height == h) up else Bitmap.createScaledBitmap(up, w, h, true).also { up.recycle() }
-        } else {
-            // Default: the exact crop at its native resolution. No resampling,
-            // no invented detail, minimal work.
+        val cw = region.width; val ch = region.height
+        // 2. Detail: the network runs at the crop's real detail scale (1/4),
+        //    output at the crop's native resolution, luminance only.
+        var mode = "AI ${sr.backend}"
+        val full: Bitmap = try {
+            val f = maxOf(SR_IN_DIV.toFloat(), maxOf(cw, ch) / SR_IN_MAX.toFloat())
+            val small = downscale(region, maxOf(64, (cw / f).toInt()), maxOf(64, (ch / f).toInt()))
+            val up = sr.upscale4x(small).also { if (small !== region) small.recycle() }
+            mode = "AI ${sr.backend}"
+            val upN = if (up.width == cw && up.height == ch) up else Bitmap.createScaledBitmap(up, cw, ch, true).also { up.recycle() }
+            lumaBlend(region, upN, DETAIL).also { upN.recycle(); region.recycle() }
+        } catch (t: Throwable) {
+            module.logMessage(Log.WARN, TAG, "ProZoom: upscaler failed ($t); exact crop")
+            mode = "exact crop (upscaler failed)"
             region
         }
+        val t2 = System.currentTimeMillis()
         val enc = ByteArrayOutputStream(jpeg.size)
         full.compress(Bitmap.CompressFormat.JPEG, 95, enc)
         full.recycle()
         val outBytes = copyExif(jpeg, enc.toByteArray(), shot.zoom)
         val ms = System.currentTimeMillis() - t0
-        val mode = if (enhance) "AI ${sr.backend}" else "native crop"
-        lastResult = "${shot.zoom.toInt()}× · ${cw}×$ch from ${w}×$h · $ms ms ($mode)"
-        log("ProZoom: ${w}x$h at ${shot.zoom}x -> ${cw}x$ch in $ms ms ($mode)")
+        lastResult = "${shot.zoom.toInt()}× · ${cw}×$ch from ${w}×$h · $ms ms ($mode) · framing: $how"
+        log("ProZoom: ${w}x$h at ${shot.zoom}x -> ${cw}x$ch at (${rect.left},${rect.top}) in $ms ms " +
+            "[frame ${t1 - t0} ms, detail ${t2 - t1} ms, encode ${System.currentTimeMillis() - t2} ms] ($mode); framing: $how")
         return outBytes
     }
 
@@ -246,7 +336,7 @@ object ProZoom {
         if (appContext != null) return
         appContext = ctx.applicationContext
         // Pick the TPU/GPU backend while the camera is idle.
-        worker.post { runCatching { if (Prefs.aiEnhance(ctx.applicationContext)) sr.warmUp() } }
+        worker.post { runCatching { sr.warmUp() } }
         val cr = ctx.applicationContext.contentResolver
         cr.registerContentObserver(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, true, object : ContentObserver(worker) {
             override fun onChange(selfChange: Boolean, uri: Uri?) {}

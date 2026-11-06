@@ -11,7 +11,8 @@ import java.nio.ByteOrder
 import java.util.zip.ZipFile
 
 /**
- * x4 super-resolution (Real-ESRGAN realesr-general-x4v3) on 256x256 tiles.
+ * x4 super-resolution (Real-ESRGAN SRVGGNetCompact x4, general model at
+ * denoise strength 0.5; see tools/build_prozoom_models.py) on 256x256 tiles.
  *
  * Backends, fastest first, chosen by a one-tile benchmark at load time:
  *  - Edge TPU through NNAPI ("google-edgetpu"), full-int8 model;
@@ -28,7 +29,13 @@ class SuperRes(private val module: MainHook) {
         private const val OUT = TILE * SCALE
     }
 
-    private class Backend(val name: String, val interp: Interpreter, val int8: Boolean, val closeable: AutoCloseable?)
+    private class Backend(val name: String, val interp: Interpreter, val int8: Boolean, val closeable: AutoCloseable?) {
+        // uint8 <-> 0..1 mapping of the quantized model's input and output.
+        val inScale = if (int8) interp.getInputTensor(0).quantizationParams().scale else 1f
+        val inZero = if (int8) interp.getInputTensor(0).quantizationParams().zeroPoint else 0
+        val outScale = if (int8) interp.getOutputTensor(0).quantizationParams().scale else 1f
+        val outZero = if (int8) interp.getOutputTensor(0).quantizationParams().zeroPoint else 0
+    }
 
     private var be: Backend? = null
     val backend: String get() = be?.name ?: "not loaded yet"
@@ -115,6 +122,8 @@ class SuperRes(private val module: MainHook) {
         val outBuf = ByteBuffer.allocateDirect(OUT * OUT * 3 * bpe).order(ByteOrder.nativeOrder())
         val px = IntArray(TILE * TILE)
         val opx = IntArray(OUT * OUT)
+        val qin = ByteArray(256) { ((it / 255f) / b.inScale + b.inZero + 0.5f).toInt().coerceIn(0, 255).toByte() }
+        val qout = IntArray(256) { ((((it - b.outZero) * b.outScale) * 255f) + 0.5f).toInt().coerceIn(0, 255) }
         val t0 = System.currentTimeMillis()
         var tiles = 0
         var y = 0
@@ -128,7 +137,7 @@ class SuperRes(private val module: MainHook) {
                 src.getPixels(px, 0, TILE, x0, y0, tw, th)
                 inBuf.rewind()
                 if (b.int8) {
-                    for (c in px) { inBuf.put((c shr 16).toByte()); inBuf.put((c shr 8).toByte()); inBuf.put(c.toByte()) }
+                    for (c in px) { inBuf.put(qin[(c shr 16) and 0xff]); inBuf.put(qin[(c shr 8) and 0xff]); inBuf.put(qin[c and 0xff]) }
                 } else {
                     for (c in px) {
                         inBuf.putFloat(((c shr 16) and 0xff) / 255f)
@@ -141,9 +150,9 @@ class SuperRes(private val module: MainHook) {
                 outBuf.rewind()
                 if (b.int8) {
                     for (i in 0 until OUT * OUT) {
-                        val r = outBuf.get().toInt() and 0xff
-                        val g = outBuf.get().toInt() and 0xff
-                        val bl = outBuf.get().toInt() and 0xff
+                        val r = qout[outBuf.get().toInt() and 0xff]
+                        val g = qout[outBuf.get().toInt() and 0xff]
+                        val bl = qout[outBuf.get().toInt() and 0xff]
                         opx[i] = (0xff shl 24) or (r shl 16) or (g shl 8) or bl
                     }
                 } else {

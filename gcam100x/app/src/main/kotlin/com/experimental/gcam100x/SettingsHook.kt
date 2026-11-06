@@ -93,9 +93,9 @@ class SettingsHook(private val module: MainHook) {
             appendLine("Pro Zoom")
             appendLine("  Range: 30× hardware, up to 120× Pro Zoom")
             appendLine("  Pro Zoom model download (centaur_p26): ${ProZoom.modelState ?: "not checked yet"}")
-            appendLine("  Output: ${if (Prefs.aiEnhance(ctx)) "AI enhanced (from 40×)" else "native-resolution crop (exact, no resampling)"}")
+            appendLine("  Framing: matched 1:1 to the viewfinder frame at the shutter")
             appendLine("  Preview stabilization above 30×: off (no drift)")
-            appendLine("  Upscaler: realesr-general-x4v3 (Real-ESRGAN, BSD-3)")
+            appendLine("  Detail: Real-ESRGAN x4 general (denoise 0.5), luminance only, native crop resolution")
             appendLine("    int8 for Edge TPU (NNAPI google-edgetpu), float for GPU/CPU")
             appendLine("  Backend: ${ProZoom.sr.backend}")
             appendLine("  Tile benchmark: ${ProZoom.sr.benchmark ?: "runs when the camera opens"}")
@@ -116,11 +116,6 @@ class SettingsHook(private val module: MainHook) {
             setPadding(pad, pad / 2, pad, 0)
             movementMethod = ScrollingMovementMethod()
         }
-        val aiBox = android.widget.CheckBox(ctx).apply {
-            setText("AI enhancement (slower, adds detail)")
-            isChecked = Prefs.aiEnhance(ctx)
-            setOnCheckedChangeListener { _, on -> Prefs.setAiEnhance(ctx, on); if (on) Thread { runCatching { ProZoom.sr.warmUp() } }.start() }
-        }
         val toastBox = android.widget.CheckBox(ctx).apply {
             setText("Show \"GCam100x active\" toast")
             isChecked = Prefs.toastEnabled(ctx)
@@ -129,8 +124,8 @@ class SettingsHook(private val module: MainHook) {
         val column = android.widget.LinearLayout(ctx).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             val pad = (20 * resources.displayMetrics.density).toInt()
-            addView(aiBox); addView(toastBox)
-            aiBox.setPadding(pad / 2, 0, 0, 0); toastBox.setPadding(pad / 2, 0, 0, 0)
+            addView(toastBox)
+            toastBox.setPadding(pad / 2, 0, 0, 0)
             addView(tv)
             setPadding(pad / 2, pad / 2, pad / 2, 0)
         }

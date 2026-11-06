@@ -14,14 +14,26 @@ Boost without hooking anything twice.
 
 ## What it does
 
-| Hook | Purpose |
-| --- | --- |
-| `CameraCharacteristics.get` | For **rear** cameras only, raises `SCALER_AVAILABLE_MAX_DIGITAL_ZOOM` and the upper bound of `CONTROL_ZOOM_RATIO_RANGE` to 100. It reads the real value first and only ever raises it. |
-| `CameraManager.getCameraCharacteristics` | Logs each camera's id, facing, **original** zoom limits and physical camera ids. |
-| `CaptureRequest.Builder.set` | Logs each new `CONTROL_ZOOM_RATIO` that Google Camera puts in a capture request. This shows whether the app actually asks the camera for more than its stock maximum. |
+Turns on Google Camera 11.1's own Pro Zoom UI (slider, label, viewfinder
+crop) up to 120× on a Pixel 9 Pro XL, and produces the Pro Zoom photo inside
+Google Camera's save pipeline:
 
-The module changes the zoom limit that Google Camera reads. The camera
-hardware can still clamp the actual crop to its real limit.
+1. **Framing (1:1).** The viewfinder past 30× is an exact centre crop of the
+   30× preview stream, but the 30× still is framed slightly differently. The
+   still is registered against the viewfinder frame on screen at the shutter
+   (normalised cross-correlation over position, scale and rotation, coarse to
+   fine; `Align.kt`, tested in `AlignTest`). If the scene is too flat to
+   match, it falls back to the centre.
+2. **Detail.** Real-ESRGAN SRVGGNetCompact x4 (general model, denoise strength
+   0.5; `tools/build_prozoom_models.py`) runs on the Edge TPU through NNAPI
+   (GPU/CPU fallback). It runs at the crop's real detail scale (1/4), the result
+   is at the crop's native resolution, and only luminance detail is
+   applied, so colour, tone and grain stay the photo's own.
+3. Preview stabilization is turned off while Pro Zoom is active, so the
+   magnified preview does not drift.
+
+Settings → GCam100x (last entry) shows versions, backend, the last photo's
+timing and framing result, a "Copy log" button and the startup toast switch.
 
 ## Build
 
