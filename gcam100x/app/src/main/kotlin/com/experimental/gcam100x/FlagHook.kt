@@ -57,10 +57,12 @@ class FlagHook(private val module: MainHook) {
     private val loggedFlags: MutableSet<String> = Collections.synchronizedSet(HashSet())
 
     fun install(param: XposedModuleInterface.PackageLoadedParam) {
-        findCentaurManifest(param)?.let { (asset, variant) ->
-            forceString["camera.centaur_manifest_config_file_name"] = "asset:/$asset"
-            forceString["camera.centaur_variant"] = variant
-        }
+        // Prefer a manifest bundled in the installed APK; otherwise use the
+        // Pixel 10 one that ManifestHook serves.
+        val (asset, variant) = findCentaurManifest(param)
+            ?: (ManifestHook.ASSET to ManifestHook.VARIANT)
+        forceString["camera.centaur_manifest_config_file_name"] = "asset:/$asset"
+        forceString["camera.centaur_variant"] = variant
         try {
             val loader = param.defaultClassLoader
             val beginSection = Class.forName("android.os.Trace")
