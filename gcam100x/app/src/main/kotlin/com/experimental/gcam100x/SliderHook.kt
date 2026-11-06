@@ -35,6 +35,7 @@ class SliderHook(private val module: MainHook) {
         val loader = param.defaultClassLoader
         hookFloat(loader, "tmu", "a") { v -> maxOf(v, TARGET) }
         hookViewfinderDiag(loader)
+        hookProZoomState(loader)
         // kkp.a() builds the zoom stops; it only adds the Pro Zoom level when
         // kkp.v (a "Pro Zoom UI active" observable) is true. kmd reads the same
         // observable as ub.i. Wrap both so d() reports true.
@@ -128,6 +129,52 @@ class SliderHook(private val module: MainHook) {
         once("wrap${obj.javaClass.name}.$field", "Forced ${obj.javaClass.name}.$field (Pro Zoom UI gate) true; original=$orig")
     }
 
+    /**
+     * tmp.o() decides the Pro Zoom state (tnn): NOT_ALLOWED,
+     * NOT_ALLOWED_MODEL_UNAVAILABLE or ALLOWED. It needs: Pro Zoom enabled
+     * (o), PHOTO mode (c), AI-zoom state >= INACTIVE_ALLOWED (m), !(i && !p),
+     * back camera (e), !k, and model state (g) == UP_TO_DATE for ALLOWED.
+     * Only ALLOWED turns on the beyond-30x viewfinder renderer and capture.
+     * Log every input, and return ALLOWED when Pro Zoom is on in Photo mode
+     * on the back camera.
+     */
+    private fun hookProZoomState(loader: ClassLoader) {
+        runCatching {
+            val tmp = loader.loadClass("tmp")
+            val o = tmp.getDeclaredMethod("o")
+            val urt = loader.loadClass("urt"); val dM = urt.getMethod("d")
+            fun f(n: String) = tmp.getDeclaredField(n).apply { isAccessible = true }
+            val fc = f("c"); val fe = f("e"); val fg = f("g"); val fi = f("i"); val fk = f("k"); val fm = f("m")
+            val fo = f("o"); val fp = f("p")
+            // tnn is an obfuscated enum-like class: a=NOT_ALLOWED,
+            // b=NOT_ALLOWED_MODEL_UNAVAILABLE, c=ALLOWED.
+            val allowed = loader.loadClass("tnn").getDeclaredField("c").apply { isAccessible = true }.get(null)
+            // vhd is an obfuscated enum-like class: vhd.b == BACK.
+            val vhdBack = loader.loadClass("vhd").getDeclaredField("b").apply { isAccessible = true }.get(null)
+            var lastDesc = ""
+            module.hookMethod(o).intercept { chain ->
+                val r = chain.proceed()
+                val t = chain.thisObject
+                val mode = runCatching { dM.invoke(fc.get(t)) }.getOrNull()
+                val cam = runCatching { dM.invoke(fe.get(t)) }.getOrNull()
+                val model = runCatching { dM.invoke(fg.get(t)) }.getOrNull()
+                val m = runCatching { dM.invoke(fm.get(t)) }.getOrNull()
+                val i = runCatching { dM.invoke(fi.get(t)) }.getOrNull()
+                val k = runCatching { dM.invoke(fk.get(t)) }.getOrNull()
+                val en = fo.getBoolean(t); val p = fp.getBoolean(t)
+                val back = cam === vhdBack
+                val desc = "result=$r enabled=$en mode=$mode camera=$cam model=$model aiZoomOk(m)=$m i=$i p=$p k=$k"
+                if (desc != lastDesc) { lastDesc = desc; module.logMessage(Log.INFO, TAG, "Pro Zoom state inputs: $desc") }
+                val isPhoto = (mode as? Enum<*>)?.name == "PHOTO" || mode?.toString() == "PHOTO"
+                if (r != allowed && en && isPhoto && back) {
+                    once("allowed", "Pro Zoom state: $r -> ALLOWED")
+                    allowed
+                } else r
+            }
+            module.logMessage(Log.INFO, TAG, "Pro Zoom state hook on tmp.o()")
+        }.onFailure { module.logMessage(Log.WARN, TAG, "tmp.o hook failed: $it") }
+    }
+
     /** Diagnostics for the beyond-30x viewfinder path. */
     private fun hookViewfinderDiag(loader: ClassLoader) {
         // tnm(active, zoom, previewScale): previewScale = threshold/zoom when active.
@@ -163,22 +210,6 @@ class SliderHook(private val module: MainHook) {
             val thrF = tmuCls.getDeclaredField("b").apply { isAccessible = true }
             module.hookMethod(apply).intercept { chain ->
                 val kind0 = runCatching { bF.getInt(chain.thisObject) }.getOrDefault(-1)
-                // tmr[0]([active, zoom]) -> tnm(active, zoom, active ? threshold/zoom : 1).
-                // "active" stays false on this phone even past the threshold, so the
-                // viewfinder never crops beyond 30x. Derive it from the zoom instead.
-                if (kind0 == 0) {
-                    val tmuObj = aF.get(chain.thisObject)
-                    val list = chain.getArg(0) as? List<*>
-                    if (tmuCls.isInstance(tmuObj) && list != null && list.size >= 2 && list[0] == false) {
-                        val zoom = (list[1] as? Float)
-                        val thr = thrF.getFloat(tmuObj)
-                        if (zoom != null && thr > 0f && zoom > thr) {
-                            val copy = ArrayList<Any?>(list); copy[0] = true
-                            once("activeforced", "Pro Zoom viewfinder: active false -> true at ${zoom}x (threshold $thr)")
-                            return@intercept chain.proceed(arrayOf(copy))
-                        }
-                    }
-                }
                 val r = chain.proceed()
                 val kind = kind0
                 if (kind == 0 || kind == 1) {
