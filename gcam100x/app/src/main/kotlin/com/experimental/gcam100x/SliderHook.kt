@@ -42,7 +42,8 @@ class SliderHook(private val module: MainHook) {
             // kkp.j() = v.d() && mode == PHOTO && back camera. Hook it directly:
             // kkp.f() (zoom config builder) calls it before kkp.a() runs.
             val jm = kkp.getDeclaredMethod("j")
-            val tbpPhoto = loader.loadClass("tbp").getField("PHOTO").get(null)
+            // Enum field names are obfuscated; match the constant by its name().
+            val tbpPhoto = loader.loadClass("tbp").enumConstants!!.first { (it as Enum<*>).name == "PHOTO" }
             val lF = kkp.getDeclaredField("l").apply { isAccessible = true }
             val mF = kkp.getDeclaredField("m").apply { isAccessible = true }
             val urt = loader.loadClass("urt")
