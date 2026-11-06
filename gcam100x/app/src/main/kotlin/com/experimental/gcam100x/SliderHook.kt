@@ -164,6 +164,7 @@ class SliderHook(private val module: MainHook) {
                 val k = runCatching { dM.invoke(fk.get(t)) }.getOrNull()
                 val en = fo.getBoolean(t); val p = fp.getBoolean(t)
                 val back = cam === vhdBack
+                model?.let { ProZoom.modelState = it.toString() }
                 val desc = "result=$r enabled=$en mode=$mode camera=$cam model=$model aiZoomOk(m)=$m i=$i p=$p k=$k"
                 if (desc != lastDesc) { lastDesc = desc; module.logMessage(Log.INFO, TAG, "Pro Zoom state inputs: $desc") }
                 val isPhoto = (mode as? Enum<*>)?.name == "PHOTO" || mode?.toString() == "PHOTO"
@@ -292,6 +293,7 @@ class SliderHook(private val module: MainHook) {
             module.hookCtor(ctor).intercept { chain ->
                 val r = chain.proceed()
                 (chain.getArg(1) as? Float)?.let { z -> if (z > 0f) { lastZoom = z; lastZoomTime = System.currentTimeMillis() } }
+                ProZoom.liveScale = if (chain.getArg(0) == true) ((chain.getArg(2) as? Float) ?: 1f) else 1f
                 if (chain.getArg(0) == true) lastActiveTnm = chain.thisObject
                 else if ((chain.getArg(1) as? Float ?: 0f) > 0f) lastActiveTnm = null
                 val desc = "active=${chain.getArg(0)} zoom=${chain.getArg(1)} scale=${chain.getArg(2)}"

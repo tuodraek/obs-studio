@@ -31,7 +31,8 @@ class SuperRes(private val module: MainHook) {
     private class Backend(val name: String, val interp: Interpreter, val int8: Boolean, val closeable: AutoCloseable?)
 
     private var be: Backend? = null
-    val backend: String get() = be?.name ?: "none"
+    val backend: String get() = be?.name ?: "not loaded yet"
+    @Volatile var benchmark: String? = null; private set
 
     private fun loadModel(asset: String): ByteBuffer {
         val apk = module.moduleApplicationInfo.sourceDir
@@ -90,7 +91,8 @@ class SuperRes(private val module: MainHook) {
             val b = Backend("CPU", Interpreter(f32, Interpreter.Options().setNumThreads(4).setUseXNNPACK(true)), false, null)
             candidates += b to (bench(b) ?: -1)
         }
-        module.logMessage(Log.INFO, TAG, "SuperRes: tile benchmark " + candidates.joinToString { "${it.first.name}=${it.second} ms" })
+        benchmark = candidates.joinToString { "${it.first.name}=${it.second} ms" } + " per 256px tile"
+        module.logMessage(Log.INFO, TAG, "SuperRes: tile benchmark $benchmark")
         val best = candidates.minBy { it.second }.first
         candidates.filter { it.first !== best }.forEach { close(it.first) }
         be = best

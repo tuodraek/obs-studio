@@ -30,6 +30,7 @@ class MainHook : XposedModule() {
         FlagHook(this).install(param)
         ZoomHook(this).install()
         SliderHook(this).install(param)
+        SettingsHook(this).install(param)
     }
 
     fun hookMethod(method: Method) = hook(method)
@@ -37,6 +38,7 @@ class MainHook : XposedModule() {
 
     /** LSPosed/Vector mirrors module logs to logcat under the same tag. */
     @Volatile private var logFile: java.io.File? = null
+    fun logFilePath(): String? = logFile?.absolutePath
     private val pending = ArrayList<String>()
     @Volatile var lastError: String? = null
 

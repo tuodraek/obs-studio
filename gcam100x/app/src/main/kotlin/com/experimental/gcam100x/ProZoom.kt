@@ -66,6 +66,10 @@ object ProZoom {
     }
 
     @Volatile private var last: Shot? = null
+    /** Current viewfinder Pro Zoom crop (1 = none), from the live tnm state. */
+    @Volatile var liveScale = 1f
+    @Volatile var modelState: String? = null
+    @Volatile var lastResult: String? = null
 
     /** The most recent shot, if taken in the last 10 s. */
     fun latestShot(): Shot? = last?.takeIf { System.currentTimeMillis() - it.time < 10_000 }
@@ -119,6 +123,25 @@ object ProZoom {
                 chain.proceed(arrayOf(chain.getArg(0), scaled, chain.getArg(2)))
             }
             log("ProZoom: thumbnail hook on rrg.c()")
+            // Viewfinder screenshots (shutter animation, placeholder thumbnail)
+            // come from the raw preview stream, which is not Pro Zoom cropped
+            // (the crop is applied by the on-screen renderer). Crop them to
+            // the live zoom so they match what is shown.
+            val swj = loader.loadClass("swj")
+            val yia = loader.loadClass("yia")
+            val ctor = swj.getDeclaredConstructor(Bitmap::class.java, Int::class.javaPrimitiveType, yia, Boolean::class.javaPrimitiveType)
+            module.hookCtor(ctor).intercept { ch ->
+                val s = liveScale
+                val bmp = ch.getArg(0) as? Bitmap
+                if (bmp == null || bmp.isRecycled || s >= 0.999f || s <= 0f) return@intercept ch.proceed()
+                val w = bmp.width; val h = bmp.height
+                val cw = (w * s).toInt().coerceAtLeast(2); val chh = (h * s).toInt().coerceAtLeast(2)
+                val crop = Bitmap.createBitmap(bmp, (w - cw) / 2, (h - chh) / 2, cw, chh)
+                val scaled = Bitmap.createScaledBitmap(crop, w, h, true)
+                if (crop !== scaled) crop.recycle()
+                ch.proceed(arrayOf(scaled, ch.getArg(1), ch.getArg(2), ch.getArg(3)))
+            }
+            log("ProZoom: viewfinder screenshot hook on swj")
         }.onFailure { module.logMessage(Log.WARN, TAG, "ProZoom: thumbnail hook failed: $it") }
     }
 
@@ -191,7 +214,9 @@ object ProZoom {
         full.compress(Bitmap.CompressFormat.JPEG, 95, enc)
         full.recycle()
         val outBytes = copyExif(jpeg, enc.toByteArray(), shot.zoom)
-        log("ProZoom: ${w}x$h at ${shot.zoom}x (crop ${cw}x$ch) done in ${System.currentTimeMillis() - t0} ms (${sr.backend})")
+        val ms = System.currentTimeMillis() - t0
+        lastResult = "${shot.zoom.toInt()}× · ${w}×$h · $ms ms (${if (shot.zoom >= SR_MIN_ZOOM) sr.backend else "resize"})"
+        log("ProZoom: ${w}x$h at ${shot.zoom}x (crop ${cw}x$ch) done in $ms ms (${sr.backend})")
         return outBytes
     }
 
