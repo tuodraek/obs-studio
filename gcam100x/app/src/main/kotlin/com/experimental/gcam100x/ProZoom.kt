@@ -50,6 +50,8 @@ object ProZoom {
         @Volatile var thumbKey: Any? = null
         /** Viewfinder frame on screen at the shutter. */
         @Volatile var view: Align.View? = null
+        @Volatile var thumbIn: Bitmap? = null
+        @Volatile var thumbOut: Bitmap? = null
     }
 
     private val shots = ConcurrentLinkedQueue<Shot>()
@@ -112,25 +114,28 @@ object ProZoom {
             }
             log("ProZoom: save-pipeline hook on vnn.g()")
         }.onFailure { module.logMessage(Log.WARN, TAG, "ProZoom: vnn hook failed: $it") }
-        // Shot thumbnail (camera thumbnail button + Google Photos processing
-        // preview): rrg.c(shot, bitmap, rotation). Crop it to the zoom too.
+        // Shot thumbnail. Google Camera hands it out in two places:
+        //  - rbl.g(shot, bitmap, rotation): dispatched straight to every shot
+        //    listener (thumbnail button, the gallery's first image, shutter
+        //    animation), and
+        //  - rrg.c(shot, bitmap, rotation): the cache Google Photos'
+        //    "processing" preview (CameraContentProvider) reads from.
+        // Both get the same Pro Zoom framed bitmap.
+        runCatching {
+            val rbl = loader.loadClass("rbl")
+            val g = rbl.declaredMethods.first { it.name == "g" && it.parameterTypes.size == 3 && it.parameterTypes[1] == Bitmap::class.java }
+            module.hookMethod(g).intercept { chain ->
+                val out = thumbFor(chain.getArg(0), chain.getArg(1) as? Bitmap, "listeners")
+                if (out == null) chain.proceed() else chain.proceed(arrayOf(chain.getArg(0), out, chain.getArg(2)))
+            }
+            log("ProZoom: thumbnail hook on rbl.g()")
+        }.onFailure { module.logMessage(Log.WARN, TAG, "ProZoom: rbl hook failed: $it") }
         runCatching {
             val rrg = loader.loadClass("rrg")
             val c = rrg.declaredMethods.first { it.name == "c" && it.parameterTypes.size == 3 && it.parameterTypes[1] == Bitmap::class.java }
             module.hookMethod(c).intercept { chain ->
-                val bmp = chain.getArg(1) as? Bitmap
-                val key = chain.getArg(0)
-                var shot = last?.takeIf { it.thumbKey === key }
-                if (shot == null) shot = latestShot()?.takeIf { it.thumbKey == null && System.currentTimeMillis() - it.time < 3_000 }?.also { it.thumbKey = key }
-                if (bmp == null || shot == null || bmp.isRecycled) return@intercept chain.proceed()
-                val w = bmp.width; val h = bmp.height
-                // Same 1:1 framing as the final photo.
-                val (r, how) = frame(w, h, shot, bmp)
-                val crop = Bitmap.createBitmap(bmp, r.left, r.top, r.width().coerceAtLeast(2), r.height().coerceAtLeast(2))
-                val scaled = Bitmap.createScaledBitmap(crop, w, h, true)
-                if (crop !== bmp && crop !== scaled) crop.recycle()
-                log("ProZoom: thumbnail ${w}x$h cropped to ${shot.zoom}x; framing: $how")
-                chain.proceed(arrayOf(chain.getArg(0), scaled, chain.getArg(2)))
+                val out = thumbFor(chain.getArg(0), chain.getArg(1) as? Bitmap, "cache")
+                if (out == null) chain.proceed() else chain.proceed(arrayOf(chain.getArg(0), out, chain.getArg(2)))
             }
             log("ProZoom: thumbnail hook on rrg.c()")
             // Viewfinder screenshots (shutter animation, placeholder thumbnail)
@@ -155,10 +160,37 @@ object ProZoom {
                 }
                 val scaled = Bitmap.createScaledBitmap(crop, w, h, true)
                 if (crop !== scaled) crop.recycle()
+                ours[scaled] = true
                 ch.proceed(arrayOf(scaled, ch.getArg(1), ch.getArg(2), ch.getArg(3)))
             }
             log("ProZoom: viewfinder screenshot hook on swj")
         }.onFailure { module.logMessage(Log.WARN, TAG, "ProZoom: thumbnail hook failed: $it") }
+    }
+
+    /** Bitmaps this module produced (already Pro Zoom framed). */
+    private val ours: MutableMap<Bitmap, Boolean> = Collections.synchronizedMap(java.util.WeakHashMap())
+
+    /**
+     * Pro Zoom framed version of a shot thumbnail, or null to leave it as is.
+     * The same input bitmap always maps to the same output.
+     */
+    private fun thumbFor(key: Any?, bmp: Bitmap?, where: String): Bitmap? {
+        if (key == null || bmp == null || bmp.isRecycled || ours.containsKey(bmp)) return null
+        var shot = last?.takeIf { it.thumbKey === key }
+        if (shot == null) shot = latestShot()?.takeIf { it.thumbKey == null && System.currentTimeMillis() - it.time < 5_000 }?.also { it.thumbKey = key }
+        if (shot == null) return null
+        synchronized(shot) {
+            if (shot.thumbIn === bmp) shot.thumbOut?.let { if (!it.isRecycled) return it }
+            val w = bmp.width; val h = bmp.height
+            val (r, how) = frame(w, h, shot, bmp)
+            val crop = Bitmap.createBitmap(bmp, r.left, r.top, r.width().coerceAtLeast(2), r.height().coerceAtLeast(2))
+            val scaled = Bitmap.createScaledBitmap(crop, w, h, true)
+            if (crop !== bmp && crop !== scaled) crop.recycle()
+            ours[scaled] = true
+            shot.thumbIn = bmp; shot.thumbOut = scaled
+            log("ProZoom: thumbnail ($where) ${w}x$h framed to ${shot.zoom}x; framing: $how")
+            return scaled
+        }
     }
 
     /** Buffers Google Camera's JPEG and writes the Pro Zoom result on close. */
