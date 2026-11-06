@@ -50,12 +50,13 @@ class SuperRes(private val module: MainHook) {
             b.rewind(); b
         }
         val it = try {
-            val d = GpuDelegate()
+            val d = GpuDelegate(GpuDelegate.Options().setPrecisionLossAllowed(true)
+                .setInferencePreference(GpuDelegate.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED))
             Interpreter(buf, Interpreter.Options().addDelegate(d)).also { gpu = d; backend = "GPU" }
         } catch (t: Throwable) {
             module.logMessage(Log.WARN, TAG, "SuperRes: GPU delegate unavailable ($t), using CPU")
             gpu?.close(); gpu = null
-            Interpreter(buf, Interpreter.Options().setNumThreads(4).setUseXNNPACK(true)).also { backend = "CPU" }
+            Interpreter(buf, Interpreter.Options().setNumThreads(3).setUseXNNPACK(true)).also { backend = "CPU" }
         }
         interpreter = it
         module.logMessage(Log.INFO, TAG, "SuperRes: Real-ESRGAN x4 loaded ($backend)")
@@ -63,7 +64,7 @@ class SuperRes(private val module: MainHook) {
     }
 
     /** Returns a bitmap 4x the size of [src]. */
-    fun upscale4x(src: Bitmap): Bitmap {
+    fun upscale4x(src: Bitmap, onProgress: (Int, Int) -> Unit = { _, _ -> }): Bitmap {
         val interp = ensure()
         val w = src.width; val h = src.height
         val out = Bitmap.createBitmap(w * SCALE, h * SCALE, Bitmap.Config.ARGB_8888)
@@ -73,6 +74,8 @@ class SuperRes(private val module: MainHook) {
         val opx = IntArray(TILE * SCALE * TILE * SCALE)
         val t0 = System.currentTimeMillis()
         var tiles = 0
+        val total = ((w + CORE - 1) / CORE) * ((h + CORE - 1) / CORE)
+        var lastPct = -1
         var y = 0
         while (y < h) {
             var x = 0
@@ -107,6 +110,8 @@ class SuperRes(private val module: MainHook) {
                 val cw = (cx1 - x) * SCALE; val chh = (cy1 - y) * SCALE
                 out.setPixels(opx, sy * ow + sx, ow, x * SCALE, y * SCALE, cw, chh)
                 tiles++
+                val pct = tiles * 100 / total
+                if (pct >= lastPct + 5) { lastPct = pct; onProgress(tiles, total) }
                 x += CORE
             }
             y += CORE

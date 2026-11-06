@@ -89,7 +89,7 @@ object PostCropHook {
         for (job in active) {
             val r = query(ctx, "${MediaStore.Images.Media._ID}=?", arrayOf(job.id.toString())).firstOrNull() ?: continue
             if (r[1] != 0L) { retry = true; continue }
-            if (r[2] != done[job.id]) cropId(ctx, job.id, job.p)
+            if (job.id !in writing && r[2] != done[job.id]) cropId(ctx, job.id, job.p)
         }
         // 2) New photos for queued shots.
         val p = pending.peek()
@@ -111,52 +111,98 @@ object PostCropHook {
     }
 
     private fun cropId(ctx: Context, id: Long, p: Pending) {
+        if (id in writing) return
         val uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
         runCatching { done[id] = crop(ctx, uri, p) }
             .onFailure { done[id] = -1; module.logMessage(Log.WARN, TAG, "Post-crop failed for $uri: ${Log.getStackTraceString(it)}") }
     }
 
-    /** Returns the size of the written file. */
+    /** Photos we are writing right now (so our own writes don't trigger a re-crop). */
+    private val writing: MutableSet<Long> = Collections.synchronizedSet(HashSet())
+    private val srThread by lazy {
+        HandlerThread("gcam100x-superres", android.os.Process.THREAD_PRIORITY_BACKGROUND).apply { start() }
+    }
+
+    /**
+     * Stage 1 (immediately): plain center crop at the chosen zoom.
+     * Stage 2 (background, >= SR_MIN_ZOOM): Real-ESRGAN rebuild of the same
+     * crop from the original pixels, with a progress notification.
+     * Returns the size of the stage-1 file.
+     */
     private fun crop(ctx: Context, uri: Uri, p: Pending): Long {
         val cr = ctx.contentResolver
+        val id = ContentUris.parseId(uri)
         val original = cr.openInputStream(uri)!!.use { it.readBytes() }
-        // Keep EXIF from the original.
         val exifIn = ExifInterface(java.io.ByteArrayInputStream(original))
+        val region = decodeCrop(original, p)
+        val (w, h) = imageSize(original)
+        val fast = Bitmap.createScaledBitmap(region, w, h, true)
+        region.recycle()
+        val size = write(ctx, uri, id, fast, exifIn, p)
+        fast.recycle()
+        module.logMessage(Log.INFO, TAG, "Post-crop: $uri cropped to ${p.zoom}x instantly")
+        if (p.zoom >= SR_MIN_ZOOM) {
+            Handler(srThread.looper).post { enhance(ctx, uri, id, original, exifIn, p, w, h) }
+        }
+        return size
+    }
+
+    private fun imageSize(bytes: ByteArray): Pair<Int, Int> {
+        val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o)
+        return o.outWidth to o.outHeight
+    }
+
+    private fun decodeCrop(bytes: ByteArray, p: Pending): Bitmap {
         @Suppress("DEPRECATION")
-        val decoder = BitmapRegionDecoder.newInstance(original, 0, original.size, false)!!
+        val decoder = BitmapRegionDecoder.newInstance(bytes, 0, bytes.size, false)!!
         val w = decoder.width; val h = decoder.height
         val cw = (w * p.scale).toInt().coerceAtLeast(16); val ch = (h * p.scale).toInt().coerceAtLeast(16)
         val left = (w - cw) / 2; val top = (h - ch) / 2
-        val region = decoder.decodeRegion(Rect(left, top, left + cw, top + ch), null)
-        decoder.recycle()
-        val scaled = if (p.zoom >= SR_MIN_ZOOM) {
-            // Model input: the crop at 1/4 of the output size (exact for 120x),
-            // so the x4 network output is the full photo resolution.
-            val small = if (region.width != w / 4 || region.height != h / 4)
-                Bitmap.createScaledBitmap(region, w / 4, h / 4, true).also { region.recycle() } else region
-            toast(ctx, "Pro Res Zoom: enhancing ${p.zoom.toInt()}× photo…")
-            val up = try { sr.upscale4x(small) } catch (t: Throwable) {
-                module.logMessage(Log.WARN, TAG, "SuperRes failed, plain resize: ${Log.getStackTraceString(t)}")
-                Bitmap.createScaledBitmap(small, w, h, true)
+        return decoder.decodeRegion(Rect(left, top, left + cw, top + ch), null).also { decoder.recycle() }
+    }
+
+    private fun write(ctx: Context, uri: Uri, id: Long, bmp: Bitmap, exifIn: ExifInterface, p: Pending): Long {
+        val cr = ctx.contentResolver
+        val out = ByteArrayOutputStream(8 shl 20)
+        bmp.compress(Bitmap.CompressFormat.JPEG, 95, out)
+        writing.add(id)
+        try {
+            cr.openOutputStream(uri, "wt")!!.use { it.write(out.toByteArray()) }
+            cr.openFileDescriptor(uri, "rw")?.use { pfd ->
+                val exifOut = ExifInterface(pfd.fileDescriptor)
+                for (tag in EXIF_TAGS) exifIn.getAttribute(tag)?.let { exifOut.setAttribute(tag, it) }
+                exifOut.setAttribute(ExifInterface.TAG_DIGITAL_ZOOM_RATIO, String.format("%.1f", p.zoom))
+                exifOut.saveAttributes()
+            }
+            val size = cr.openFileDescriptor(uri, "r")?.use { it.statSize } ?: -1L
+            done[id] = size
+            return size
+        } finally {
+            writing.remove(id)
+        }
+    }
+
+    private fun enhance(ctx: Context, uri: Uri, id: Long, original: ByteArray, exifIn: ExifInterface, p: Pending, w: Int, h: Int) {
+        val notif = ProgressNotification(ctx, id.toInt())
+        notif.show("Enhancing ${p.zoom.toInt()}× photo", 0)
+        try {
+            val region = decodeCrop(original, p)
+            // Model input: the crop at 1/4 of the output size (exact for 120x).
+            val small = Bitmap.createScaledBitmap(region, w / 4, h / 4, true)
+            if (small !== region) region.recycle()
+            val up = try {
+                sr.upscale4x(small) { doneTiles, total -> notif.show("Enhancing ${p.zoom.toInt()}× photo", doneTiles * 100 / total) }
             } finally { small.recycle() }
-            if (up.width != w || up.height != h) Bitmap.createScaledBitmap(up, w, h, true).also { up.recycle() } else up
-        } else {
-            Bitmap.createScaledBitmap(region, w, h, true).also { region.recycle() }
+            val full = if (up.width != w || up.height != h) Bitmap.createScaledBitmap(up, w, h, true).also { up.recycle() } else up
+            write(ctx, uri, id, full, exifIn, p)
+            full.recycle()
+            notif.done("${p.zoom.toInt()}× photo enhanced")
+            module.logMessage(Log.INFO, TAG, "Post-crop: $uri enhanced (${sr.backend})")
+        } catch (t: Throwable) {
+            notif.done("Enhancement failed; zoomed photo kept")
+            module.logMessage(Log.WARN, TAG, "Enhance failed for $uri: ${Log.getStackTraceString(t)}")
         }
-        val out = ByteArrayOutputStream(original.size)
-        scaled.compress(Bitmap.CompressFormat.JPEG, 95, out)
-        scaled.recycle()
-        cr.openOutputStream(uri, "wt")!!.use { it.write(out.toByteArray()) }
-        // Restore EXIF (orientation, date, camera, GPS...).
-        cr.openFileDescriptor(uri, "rw")?.use { pfd ->
-            val exifOut = ExifInterface(pfd.fileDescriptor)
-            for (tag in EXIF_TAGS) exifIn.getAttribute(tag)?.let { exifOut.setAttribute(tag, it) }
-            exifOut.setAttribute(ExifInterface.TAG_DIGITAL_ZOOM_RATIO, String.format("%.1f", p.zoom))
-            exifOut.saveAttributes()
-        }
-        val size = cr.openFileDescriptor(uri, "r")?.use { it.statSize } ?: -1L
-        module.logMessage(Log.INFO, TAG, "Post-crop: $uri ${w}x$h cropped to ${cw}x$ch (zoom ${p.zoom}x) and saved")
-        return size
     }
 
     private fun toast(ctx: Context, msg: String) {
