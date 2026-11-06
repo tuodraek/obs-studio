@@ -20,6 +20,10 @@ class MainHook : XposedModule() {
         // The framework classes we hook are shared by the whole process, so
         // install exactly once even if several packages load into it.
         if (!installed.compareAndSet(false, true)) return
+        logFile = java.io.File(param.applicationInfo.dataDir, "files/gcam100x.log").also {
+            runCatching { it.parentFile?.mkdirs(); it.writeText("") }
+        }
+        logMessage(Log.INFO, TAG, "GCam100x ${BuildConfig.VERSION_NAME} starting in ${param.packageName}")
         ManifestHook(this).install(param)
         VersionHook(this).install(param)
         DiagHook(this).install()
@@ -31,8 +35,20 @@ class MainHook : XposedModule() {
     fun hookMethod(method: Method) = hook(method)
 
     /** LSPosed/Vector mirrors module logs to logcat under the same tag. */
+    @Volatile private var logFile: java.io.File? = null
+
     fun logMessage(priority: Int, tag: String, msg: String) {
         runCatching { log(priority, tag, msg) }
+        // Also keep our own log in the camera's data dir (logcat buffers
+        // roll over too fast): /data/data/com.google.android.GoogleCamera/files/gcam100x.log
+        if (msg.startsWith("Property read") || msg.startsWith("Feature query")) return
+        logFile?.let { f ->
+            runCatching {
+                synchronized(this) {
+                    if (f.length() < 4_000_000) f.appendText("${java.text.SimpleDateFormat("HH:mm:ss.SSS").format(java.util.Date())} $msg\n")
+                }
+            }
+        }
     }
 
     companion object {

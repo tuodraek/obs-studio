@@ -3,6 +3,7 @@ plugins {
 }
 
 android {
+    buildFeatures { buildConfig = true }
     namespace = "com.experimental.gcam100x"
     compileSdk = 37
 
