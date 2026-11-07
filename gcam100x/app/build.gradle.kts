@@ -18,7 +18,6 @@ android {
     }
 
     // The Real-ESRGAN model is read straight from the APK.
-    androidResources { noCompress += "tflite" }
 
     buildTypes {
         release {
@@ -37,11 +36,7 @@ android {
 
 dependencies {
     compileOnly(libs.libxposed.api)
-    implementation("com.google.ai.edge.litert:litert:1.4.2")
-    implementation("com.google.ai.edge.litert:litert-gpu:1.4.2")
-    implementation("com.google.ai.edge.litert:litert-gpu-api:1.4.2")
     
 }
 
-// Pro Zoom upscaler models: app/src/main/assets/prozoom_x4_*.tflite (see tools/build_prozoom_models.py).
 

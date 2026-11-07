@@ -30,25 +30,19 @@ import java.util.concurrent.ConcurrentLinkedQueue
  *    Google Camera's own Pro Zoom crops it (sxh.r). Every consumer (thumbnail
  *    button, gallery, Photos' processing preview) gets the cropped bitmap.
  *  - Photo: Google Camera's JPEG is intercepted as it writes the pending
- *    MediaStore item (vnn.g()), cropped and rebuilt with the upscaler, and
+ *    MediaStore item (vnn.g()) and cropped (unless Google's model made it), and
  *    written before the item is published. The gallery never has the 30x
  *    image.
  */
 object ProZoom {
     private const val TAG = "GCam100x"
-    /** Network input = crop / this. */
-    private const val SR_IN_DIV = 4
-    /** Longest network input side. */
-    private const val SR_IN_MAX = 1024
-    /** Share of the network's luminance detail applied on the clean base. */
-    private const val DETAIL = 0.85f
 
     /**
      * Send Pro Zoom shots through Google Camera's own Pro Zoom pipeline
      * (CENTAUR capture + Google's model via tna). Its controller loads the
      * downloaded centaur_p26 model on this G4 (tna.i initialized=true); if the
      * model processes a shot, its output is kept untouched, otherwise the
-     * photo falls back to the centre crop + upscaler.
+     * photo is the exact centre crop.
      */
     const val GOOGLE_PRO_ZOOM = true
 
@@ -59,7 +53,6 @@ object ProZoom {
     }
 
     private lateinit var module: MainHook
-    lateinit var sr: SuperRes; private set
     @Volatile private var appContext: Context? = null
     private val worker by lazy { Handler(HandlerThread("gcam100x-prozoom").apply { start() }.looper) }
 
@@ -75,7 +68,7 @@ object ProZoom {
     @Volatile var modelState: String? = null
     @Volatile var lastResult: String? = null
 
-    fun init(m: MainHook) { module = m; sr = SuperRes(m) }
+    fun init(m: MainHook) { module = m }
 
     private fun log(msg: String) = module.logMessage(Log.INFO, TAG, msg)
     private fun warn(msg: String) = module.logMessage(Log.WARN, TAG, msg)
@@ -87,10 +80,6 @@ object ProZoom {
         last = s
         shots.add(s)
         log("ProZoom: shot at ${zoom}x (crop $scale)")
-        // Load the upscaler now (first Pro Zoom shot only), in parallel with
-        // Google Camera's own HDR+ processing: nothing touches the GPU while
-        // the camera is just previewing.
-        worker.post { runCatching { sr.warmUp() }.onFailure { warn("ProZoom: upscaler load failed: $it") } }
         return s
     }
 
@@ -214,6 +203,36 @@ object ProZoom {
                 log("Pro Zoom fusion: tna.c returned in ${System.currentTimeMillis() - t0} ms (processing continues async)")
                 r
             }
+            // Per-shot fusion mode decision: CENTAUR (myu.h) feeds Google's model.
+            val mye = loader.loadClass("mye")
+            val myvCls = loader.loadClass("myv")
+            val dec = mye.declaredMethods.first { it.name == "a" && it.returnType == myvCls && it.parameterTypes.size == 4 }
+            val modeM = myvCls.getDeclaredMethod("a")
+            // myu is an obfuscated enum-like class: name the mode by its static field.
+            val myu = loader.loadClass("myu")
+            val modes = myu.declaredFields.filter { java.lang.reflect.Modifier.isStatic(it.modifiers) && it.type == myu }
+                .onEach { it.isAccessible = true }
+            module.hookMethod(dec).intercept { chain ->
+                val r = chain.proceed()
+                val mode = runCatching { modeM.invoke(r) }.getOrNull()
+                val name = modes.firstOrNull { runCatching { it.get(null) === mode }.getOrDefault(false) }?.name ?: "?"
+                log("Pro Zoom fusion: mode decision = myu.$name (CENTAUR = myu.h)")
+                r
+            }
+            // Post-processing pipeline start for a shot, with its fusion mode.
+            val mre = loader.loadClass("mre")
+            for (m in mre.declaredMethods.filter { it.name == "b" && it.parameterTypes.size == 6 && it.parameterTypes[5] == myvCls }) {
+                module.hookMethod(m).intercept { chain ->
+                    val mode = runCatching { modeM.invoke(chain.getArg(5)) }.getOrNull()
+                    val name = modes.firstOrNull { runCatching { it.get(null) === mode }.getOrDefault(false) }?.name ?: "?"
+                    log("Pro Zoom fusion: post-processing started with mode myu.$name")
+                    chain.proceed()
+                }
+            }
+            val myo = loader.loadClass("myo")
+            for (m in myo.declaredMethods.filter { it.name == "d" && it.parameterTypes.size == 2 }) {
+                module.hookMethod(m).intercept { chain -> log("Pro Zoom fusion: fusion session created (myo.d)"); chain.proceed() }
+            }
             log("ProZoom: Google Pro Zoom pipeline tracing installed")
         }.onFailure { warn("ProZoom: Google pipeline hooks failed: $it") }
     }
@@ -253,40 +272,7 @@ object ProZoom {
 
     // --- Rendering -------------------------------------------------------
 
-    private fun downscale(src: Bitmap, tw: Int, th: Int): Bitmap {
-        var b = src
-        while (b.width / 2 >= tw && b.height / 2 >= th) {
-            val n = Bitmap.createScaledBitmap(b, b.width / 2, b.height / 2, true)
-            if (b !== src) b.recycle()
-            b = n
-        }
-        val out = if (b.width == tw && b.height == th) b else Bitmap.createScaledBitmap(b, tw, th, true)
-        if (b !== src && b !== out) b.recycle()
-        return out
-    }
-
-    /** [base] plus [a] of [detail]'s luminance difference (colour stays the base's). */
-    private fun lumaBlend(base: Bitmap, detail: Bitmap, a: Float): Bitmap {
-        val w = base.width; val h = base.height
-        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val bp = IntArray(w); val dp = IntArray(w)
-        val k = (a * 256).toInt()
-        for (y in 0 until h) {
-            base.getPixels(bp, 0, w, 0, y, w, 1); detail.getPixels(dp, 0, w, 0, y, w, 1)
-            for (x in 0 until w) {
-                val p = bp[x]; val q = dp[x]
-                val yb = (77 * ((p shr 16) and 0xff) + 150 * ((p shr 8) and 0xff) + 29 * (p and 0xff)) shr 8
-                val yd = (77 * ((q shr 16) and 0xff) + 150 * ((q shr 8) and 0xff) + 29 * (q and 0xff)) shr 8
-                val d = ((yd - yb) * k) shr 8
-                bp[x] = (0xff shl 24) or ((((p shr 16) and 0xff) + d).coerceIn(0, 255) shl 16) or
-                    ((((p shr 8) and 0xff) + d).coerceIn(0, 255) shl 8) or ((p and 0xff) + d).coerceIn(0, 255)
-            }
-            out.setPixels(bp, 0, w, 0, y, w, 1)
-        }
-        return out
-    }
-
-    /** Centre crop of [jpeg] to the shot's zoom, rebuilt with the upscaler, original EXIF kept. */
+    /** Centre crop of [jpeg] to the shot's zoom at native resolution, original EXIF kept. */
     fun render(jpeg: ByteArray, shot: Shot): ByteArray {
         val t0 = System.currentTimeMillis()
         val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -298,23 +284,10 @@ object ProZoom {
         val dec = BitmapRegionDecoder.newInstance(jpeg, 0, jpeg.size, false)!!
         val region = dec.decodeRegion(Rect(left, top, left + cw, top + ch), null)
         dec.recycle()
-        var mode = "AI ${sr.backend}"
-        val outBmp: Bitmap = try {
-            // The network works at the crop's real detail scale; the base is
-            // the crop averaged down and back up, so Google Camera's
-            // sharpening and pixel noise (magnified up to 4x) do not show.
-            val f = maxOf(SR_IN_DIV.toFloat(), maxOf(cw, ch) / SR_IN_MAX.toFloat())
-            val small = downscale(region, maxOf(64, (cw / f).toInt()), maxOf(64, (ch / f).toInt()))
-            val up = sr.upscale4x(small)
-            region.recycle()
-            val clean = Bitmap.createScaledBitmap(small, up.width, up.height, true)
-            small.recycle()
-            lumaBlend(clean, up, DETAIL).also { up.recycle(); clean.recycle() }
-        } catch (t: Throwable) {
-            warn("ProZoom: upscaler failed ($t); plain crop")
-            mode = "plain crop"
-            region
-        }
+        // Google's Pro Zoom model did not process this shot: the exact crop
+        // at its native resolution (no upscaler).
+        val outBmp = region
+        val mode = "exact crop; Google's model did not run"
         val enc = ByteArrayOutputStream(4 shl 20)
         outBmp.compress(Bitmap.CompressFormat.JPEG, 95, enc)
         val size = "${outBmp.width}x${outBmp.height}"
