@@ -26,7 +26,6 @@ class MainHook : XposedModule() {
         ProZoom.install(param.defaultClassLoader)
         BadgeHook(this).install(param)
         VersionHook(this).install(param)
-        DiagHook(this).install()
         FlagHook(this).install(param)
         ZoomHook(this).install()
         SliderHook(this).install(param)
@@ -41,6 +40,7 @@ class MainHook : XposedModule() {
     fun logFilePath(): String? = logFile?.absolutePath
     private val pending = ArrayList<String>()
     @Volatile var lastError: String? = null
+    private val writer = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "gcam100x-log").apply { isDaemon = true } }
 
     /** Called once an Activity exists: log to /sdcard/Android/data/<camera>/files/gcam100x.log. */
     fun attachLogFile(f: java.io.File) {
@@ -67,8 +67,9 @@ class MainHook : XposedModule() {
             val f = logFile
             if (f == null) {
                 if (pending.size < 5000) pending.add(line)
-            } else if (f.length() < 4_000_000) {
-                runCatching { f.appendText(line) }.onFailure { lastError = it.toString() }
+            } else {
+                // Written off the calling thread (never block the camera).
+                writer.execute { if (f.length() < 4_000_000) runCatching { f.appendText(line) }.onFailure { lastError = it.toString() } }
             }
         }
     }

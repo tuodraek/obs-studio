@@ -93,7 +93,7 @@ class SettingsHook(private val module: MainHook) {
             appendLine("Pro Zoom")
             appendLine("  Range: 30× hardware, up to 120× Pro Zoom")
             appendLine("  Pro Zoom model download (centaur_p26): ${ProZoom.modelState ?: "not checked yet"}")
-            appendLine("  Framing: matched 1:1 to the viewfinder frame at the shutter")
+            appendLine("  Framing: centre crop, the same as the viewfinder (Google Camera's own Pro Zoom crop)")
             appendLine("  Preview stabilization above 30×: off (no drift)")
             appendLine("  Detail: Real-ESRGAN x4 general (denoise 0.5), luminance only, native crop resolution")
             appendLine("    float on GPU (Edge TPU int8 degrades this model)")

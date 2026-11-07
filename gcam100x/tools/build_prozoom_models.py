@@ -80,12 +80,7 @@ if __name__ == "__main__":
             yield [im[y:y + T, x:x + T, :3][None]]
 
     open("prozoom_x4_f32.tflite", "wb").write(tf.lite.TFLiteConverter.from_concrete_functions([conc]).convert())
-    # Whole-frame models for the Pro Zoom output (one pass, no tiles):
-    # 384x512 input -> 1536x2048, portrait and landscape.
-    for h, w, name in ((512, 384, "portrait"), (384, 512, "landscape")):
-        c = build(Wm, H=h, Wd=w).get_concrete_function()
-        open(f"prozoom_x4_{name}.tflite", "wb").write(tf.lite.TFLiteConverter.from_concrete_functions([c]).convert())
-    print("float models written", flush=True)
+    print("float model written", flush=True)
     if "--float-only" in sys.argv:
         sys.exit(0)
     q = tf.lite.TFLiteConverter.from_concrete_functions([conc_res])

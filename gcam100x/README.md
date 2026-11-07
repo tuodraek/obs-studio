@@ -15,25 +15,20 @@ Boost without hooking anything twice.
 ## What it does
 
 Turns on Google Camera 11.1's own Pro Zoom UI (slider, label, viewfinder
-crop) up to 120× on a Pixel 9 Pro XL, and produces the Pro Zoom photo inside
-Google Camera's save pipeline:
+crop) up to 120× on a Pixel 9 Pro XL. The camera hardware stops at 30×, so
+past 30× the photo is the same centre crop the viewfinder shows:
 
-1. **Framing (1:1).** The viewfinder past 30× is an exact centre crop of the
-   30× preview stream, but the 30× still is framed slightly differently. The
-   still is registered against the viewfinder frame on screen at the shutter
-   (normalised cross-correlation over position, scale and rotation, coarse to
-   fine; `Align.kt`, tested in `AlignTest`). If the scene is too flat to
-   match, it falls back to the centre.
-2. **Detail.** Real-ESRGAN SRVGGNetCompact x4 (general model, denoise strength
-   0.5; `tools/build_prozoom_models.py`) runs on the GPU in float (the Edge TPU runs int8 only, which visibly degrades this
-   network). It runs at the crop's real detail scale (1/4), the result
-   is at the crop's native resolution, and only luminance detail is
-   applied, so colour, tone and grain stay the photo's own.
-3. Preview stabilization is turned off while Pro Zoom is active, so the
-   magnified preview does not drift.
+- **Capture:** Google Camera's normal 30× HDR+ / Night Sight path (the Pro Zoom
+  CENTAUR capture expects Google's model, which cannot run here).
+- **Thumbnail:** cropped where Google Camera creates it (`rah.ak` / `rah.aj`),
+  the same place Google Camera's own Pro Zoom crops it.
+- **Photo:** the JPEG is cropped and rebuilt with Real-ESRGAN (x4 general,
+  denoise 0.5, GPU) inside the save pipeline, before the gallery entry is
+  published. The gallery never has the 30× image.
+- Preview stabilization is off while Pro Zoom is active (no drift).
 
-Settings → GCam100x (last entry) shows versions, backend, the last photo's
-timing and framing result, a "Copy log" button and the startup toast switch.
+Settings → GCam100x (last entry) shows versions, the last photo's timing, a
+"Copy log" button and the startup toast switch.
 
 ## Build
 

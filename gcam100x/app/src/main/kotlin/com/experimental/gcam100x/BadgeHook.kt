@@ -24,7 +24,6 @@ class BadgeHook(private val module: MainHook) {
             module.hookMethod(onResume).intercept { chain ->
                 val r = chain.proceed()
                 val act = chain.thisObject as? Activity
-                if (act != null) ProZoom.activity = java.lang.ref.WeakReference(act)
                 if (act != null && toasted.compareAndSet(false, true)) {
                     runCatching { ProZoom.register(act) }.onFailure { module.logMessage(Log.WARN, "GCam100x", "Post-crop register failed: $it") }
                     val f = act.getExternalFilesDir(null)?.let { java.io.File(it, "gcam100x.log") }
@@ -47,12 +46,13 @@ class BadgeHook(private val module: MainHook) {
             )
             module.hookMethod(setText).intercept { chain ->
                 val text = chain.getArg(0) as? CharSequence
+                if (text == null || text.length > 80 || text.length < 6) return@intercept chain.proceed()
                 val tv = chain.thisObject as? TextView
                 val ver = camVersion ?: tv?.let { v ->
                     runCatching { v.context.packageManager.getPackageInfo(v.context.packageName, 0).versionName }
                         .getOrNull()?.also { camVersion = it }
                 }
-                if (text != null && ver != null && text.toString().contains(ver) && !text.toString().contains("GCam100x")) {
+                if (ver != null && text.toString().contains(ver) && !text.toString().contains("GCam100x")) {
                     chain.proceed(arrayOf("$text · $badge", chain.getArg(1), chain.getArg(2), chain.getArg(3)))
                 } else chain.proceed()
             }

@@ -72,7 +72,7 @@ class FlagHook(private val module: MainHook) {
             val beginSection = Class.forName("android.os.Trace")
                 .getDeclaredMethod("beginSection", String::class.java)
             module.hookMethod(beginSection).intercept { chain ->
-                if (chain.getArg(0) == CONFIG_TRACE) {
+                if (!configFound && chain.getArg(0) == CONFIG_TRACE) {
                     for (frame in Throwable().stackTrace) {
                         val name = frame.className
                         if (name.contains('.') || !processedClasses.add(name)) continue
@@ -81,6 +81,7 @@ class FlagHook(private val module: MainHook) {
                             if (isConfigClass(clazz)) {
                                 module.logMessage(Log.INFO, TAG, "Found flag config class: $name")
                                 hookConfigClass(clazz)
+                                configFound = true
                             }
                         } catch (_: Throwable) {
                         }
@@ -164,7 +165,7 @@ class FlagHook(private val module: MainHook) {
                         true
                     }
                     else -> {
-                        if (INTERESTING.containsMatchIn(name)) logOnce(name, "Flag $name = $original")
+                        if (seen.add(name) && INTERESTING.containsMatchIn(name)) logOnce(name, "Flag $name = $original")
                         original
                     }
                 }
@@ -189,7 +190,7 @@ class FlagHook(private val module: MainHook) {
                     logOnce(name, "Flag $name: original=${describe(original)} -> forced ${describe(replaced)}")
                     return@intercept replaced
                 }
-                if (name != null && INTERESTING.containsMatchIn(name)) {
+                if (name != null && seen.add(name) && INTERESTING.containsMatchIn(name)) {
                     logOnce(name, "Flag $name = ${describe(original)} (${method.returnType.simpleName})")
                 }
                 original
@@ -232,6 +233,10 @@ class FlagHook(private val module: MainHook) {
         }
         else -> v.toString().let { if (it.length > 400) it.take(400) + "..." else it }
     }
+
+    @Volatile private var configFound = false
+    /** Flag names already checked for logging (the regex runs once per name). */
+    private val seen: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
     private fun logOnce(name: String, msg: String) {
         if (loggedFlags.add(name)) module.logMessage(Log.INFO, TAG, msg)

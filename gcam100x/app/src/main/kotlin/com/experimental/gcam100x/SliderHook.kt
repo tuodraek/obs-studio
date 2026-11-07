@@ -70,7 +70,6 @@ class SliderHook(private val module: MainHook) {
                 module.hookMethod(m).intercept { chain ->
                     forceTrue(loader, chain.thisObject, "v")
                     val r = chain.proceed()
-                    once("kkp.a:$r", "Zoom stops: $r")
                     r
                 }
             }
@@ -91,7 +90,6 @@ class SliderHook(private val module: MainHook) {
                     }
                     val list = chain.getArg(0) as? List<*>
                     if (list != null && list.size >= 3) {
-                        once("kmd:${list.drop(1)}", "Slider input: f=${list.getOrNull(1)} cap=${list.getOrNull(2)} config=${list[0]?.toString()?.take(300)}")
                         val cap = (list[2] as? Float)
                         if (cap != null && cap < TARGET && cap >= 25f) {
                             val copy = ArrayList(list)
@@ -145,28 +143,21 @@ class SliderHook(private val module: MainHook) {
             val o = tmp.getDeclaredMethod("o")
             val urt = loader.loadClass("urt"); val dM = urt.getMethod("d")
             fun f(n: String) = tmp.getDeclaredField(n).apply { isAccessible = true }
-            val fc = f("c"); val fe = f("e"); val fg = f("g"); val fi = f("i"); val fk = f("k"); val fm = f("m")
-            val fo = f("o"); val fp = f("p")
+            val fc = f("c"); val fe = f("e"); val fg = f("g"); val fo = f("o")
             // tnn is an obfuscated enum-like class: a=NOT_ALLOWED,
             // b=NOT_ALLOWED_MODEL_UNAVAILABLE, c=ALLOWED.
             val allowed = loader.loadClass("tnn").getDeclaredField("c").apply { isAccessible = true }.get(null)
             // vhd is an obfuscated enum-like class: vhd.b == BACK.
             val vhdBack = loader.loadClass("vhd").getDeclaredField("b").apply { isAccessible = true }.get(null)
-            var lastDesc = ""
             module.hookMethod(o).intercept { chain ->
                 val r = chain.proceed()
                 val t = chain.thisObject
                 val mode = runCatching { dM.invoke(fc.get(t)) }.getOrNull()
                 val cam = runCatching { dM.invoke(fe.get(t)) }.getOrNull()
                 val model = runCatching { dM.invoke(fg.get(t)) }.getOrNull()
-                val m = runCatching { dM.invoke(fm.get(t)) }.getOrNull()
-                val i = runCatching { dM.invoke(fi.get(t)) }.getOrNull()
-                val k = runCatching { dM.invoke(fk.get(t)) }.getOrNull()
-                val en = fo.getBoolean(t); val p = fp.getBoolean(t)
+                val en = fo.getBoolean(t)
                 val back = cam === vhdBack
                 model?.let { ProZoom.modelState = it.toString() }
-                val desc = "result=$r enabled=$en mode=$mode camera=$cam model=$model aiZoomOk(m)=$m i=$i p=$p k=$k"
-                if (desc != lastDesc) { lastDesc = desc; module.logMessage(Log.INFO, TAG, "Pro Zoom state inputs: $desc") }
                 val isPhoto = (mode as? Enum<*>)?.name == "PHOTO" || mode?.toString() == "PHOTO"
                 if (r != allowed && en && isPhoto && back) {
                     once("allowed", "Pro Zoom state: $r -> ALLOWED")
@@ -178,9 +169,6 @@ class SliderHook(private val module: MainHook) {
     }
 
     @Volatile private var lastActiveTnm: Any? = null
-    /** pcl constructor argument that becomes pcl.k (high-res 50 MP capture). */
-    private val HI_RES_ARG = 10
-
     /** Set while this module builds its own tnm (not a viewfinder state change). */
     private val building = ThreadLocal.withInitial { false }
     @Volatile private var lastZoom = 0f
@@ -232,14 +220,7 @@ class SliderHook(private val module: MainHook) {
                     if (plain != null) {
                         val args = Array<Any?>(ctor.parameterTypes.size) { chain.getArg(it) }
                         args[idx] = plain
-                        // No 50 MP high-res capture for Pro Zoom shots (Google
-                        // Camera's own Pro Zoom excludes it too): 12.5 MP HDR+
-                        // is seconds faster, and past 30x the crop has no
-                        // extra real detail at 50 MP.
-                        val hiRes = HI_RES_ARG.takeIf { it < args.size && ctor.parameterTypes[it] == java.lang.Boolean.TYPE }
-                        val wasHiRes = hiRes?.let { args[it] == true } ?: false
-                        if (hiRes != null) args[hiRes] = false
-                        module.logMessage(Log.INFO, TAG, "Shot: normal HDR+ capture at 30x (high-res ${if (wasHiRes) "on -> off" else "off"}); Pro Zoom ${z}x applied on save")
+                        module.logMessage(Log.INFO, TAG, "Shot: normal HDR+ capture at 30x; Pro Zoom ${z}x applied on save")
                         val r = chain.proceed(args)
                         proShot?.let { ProZoom.pclShots[chain.thisObject] = it }
                         return@intercept r
@@ -252,83 +233,25 @@ class SliderHook(private val module: MainHook) {
             module.logMessage(Log.INFO, TAG, "Capture hook on pcl(tnm @ $idx)")
         }.onFailure { module.logMessage(Log.WARN, TAG, "pcl hook failed: $it") }
         runCatching {
+            // Google's Pro Zoom processor: the shot is a normal HDR+ capture
+            // (see above) and its model cannot run here, so it is not attached.
             val tna = loader.loadClass("tna")
-            val iF = tna.getDeclaredField("i").apply { isAccessible = true }
             for (m in tna.declaredMethods) {
-                if (m.name == "c" && m.parameterTypes.size == 7) {
-                    module.hookMethod(m).intercept { chain ->
-                        module.logMessage(Log.INFO, TAG, "Pro Zoom processor tna.c: shot=${chain.getArg(0)} initialized=${iF.get(chain.thisObject)} primary=${chain.getArg(2)} secondary=${chain.getArg(3)}")
-                        try { chain.proceed() } catch (t: Throwable) {
-                            module.logMessage(Log.WARN, TAG, "tna.c threw ${Log.getStackTraceString(t)}"); throw t
-                        }
-                    }
-                }
-                if (m.name == "j" && m.parameterTypes.size == 1) {
-                    module.hookMethod(m).intercept { chain ->
-                        // The shot is a normal HDR+ capture now (see pcl hook);
-                        // Google's Pro Zoom processor has no model to run here.
-                        if (m.returnType == Void.TYPE) {
-                            module.logMessage(Log.INFO, TAG, "Pro Zoom processor tna.j skipped (normal HDR+ shot)")
-                            return@intercept null
-                        }
-                        try { chain.proceed() } catch (t: Throwable) {
-                            module.logMessage(Log.WARN, TAG, "tna.j threw ${Log.getStackTraceString(t)}"); throw t
-                        }
-                    }
-                }
-                if (m.name == "a" && m.parameterTypes.size == 2 && m.parameterTypes[0] == java.lang.Long.TYPE) {
-                    module.hookMethod(m).intercept { chain ->
-                        module.logMessage(Log.INFO, TAG, "tna.a(shot=${chain.getArg(0)}) result")
-                        chain.proceed()
-                    }
-                }
-                if (m.name == "i" && m.parameterTypes.isEmpty()) {
-                    module.hookMethod(m).intercept { chain ->
-                        module.logMessage(Log.INFO, TAG, "Pro Zoom processor init (tna.i)")
-                        try { chain.proceed().also { module.logMessage(Log.INFO, TAG, "tna.i done, initialized=${iF.get(chain.thisObject)}") } } catch (t: Throwable) {
-                            module.logMessage(Log.WARN, TAG, "tna.i threw ${Log.getStackTraceString(t)}"); throw t
-                        }
-                    }
+                if (m.name == "j" && m.parameterTypes.size == 1 && m.returnType == Void.TYPE) {
+                    module.hookMethod(m).intercept { null }
                 }
             }
         }.onFailure { module.logMessage(Log.WARN, TAG, "tna hook failed: $it") }
-        runCatching {
-            // Photo capture session type (rce): CENTAUR for Pro Zoom shots.
-            val rbb = loader.loadClass("rbb")
-            val rce = loader.loadClass("rce")
-            for (c in rbb.declaredConstructors) {
-                val ri = c.parameterTypes.indexOf(rce)
-                if (ri < 0) continue
-                module.hookCtor(c).intercept { chain ->
-                    module.logMessage(Log.INFO, TAG, "Capture session type: ${chain.getArg(ri)}")
-                    chain.proceed()
-                }
-            }
-        }.onFailure { module.logMessage(Log.WARN, TAG, "rbb hook failed: $it") }
-        runCatching {
-            // Fusion mode selection result per shot.
-            val myh = loader.loadClass("myh")
-            val apply = myh.getDeclaredMethod("apply", Any::class.java)
-            val dF = myh.getDeclaredField("d").apply { isAccessible = true }
-            val eF = myh.getDeclaredField("e").apply { isAccessible = true }
-            module.hookMethod(apply).intercept { chain ->
-                val r = chain.proceed()
-                if (runCatching { eF.getInt(chain.thisObject) }.getOrDefault(1) == 0) {
-                    val mode = runCatching { dF.get(chain.thisObject)?.let { it.javaClass.getMethod("a").invoke(it) } }.getOrNull()
-                    module.logMessage(Log.INFO, TAG, "Shot fusion mode: $mode")
-                }
-                r
-            }
-        }.onFailure { module.logMessage(Log.WARN, TAG, "myh hook failed: $it") }
     }
 
-    /** Diagnostics for the beyond-30x viewfinder path. */
+    @Volatile private var lastLoggedActive = false
+
+    /** Live Pro Zoom state from the viewfinder (tnm). */
     private fun hookViewfinderDiag(loader: ClassLoader) {
         // tnm(active, zoom, previewScale): previewScale = threshold/zoom when active.
         runCatching {
             val tnm = loader.loadClass("tnm")
             val ctor = tnm.getDeclaredConstructor(java.lang.Boolean.TYPE, java.lang.Float.TYPE, java.lang.Float.TYPE)
-            var last = ""
             module.hookCtor(ctor).intercept { chain ->
                 if (building.get() == true) return@intercept chain.proceed()
                 val r = chain.proceed()
@@ -336,41 +259,11 @@ class SliderHook(private val module: MainHook) {
                 ProZoom.liveScale = if (chain.getArg(0) == true) ((chain.getArg(2) as? Float) ?: 1f) else 1f
                 if (chain.getArg(0) == true) lastActiveTnm = chain.thisObject
                 else if ((chain.getArg(1) as? Float ?: 0f) > 0f) lastActiveTnm = null
-                val desc = "active=${chain.getArg(0)} zoom=${chain.getArg(1)} scale=${chain.getArg(2)}"
-                val zoom = (chain.getArg(1) as? Float) ?: 0f
-                if (zoom >= 20f && desc != last) { last = desc; module.logMessage(Log.INFO, TAG, "Pro Zoom state: $desc") }
+                val active = chain.getArg(0) == true
+                if (active != lastLoggedActive) { lastLoggedActive = active; module.logMessage(Log.INFO, TAG, "Pro Zoom ${if (active) "on" else "off"} (${chain.getArg(1)}x)") }
                 r
             }
         }.onFailure { module.logMessage(Log.WARN, TAG, "tnm diag failed: $it") }
-        // thc = viewfinder-extension component (created only if Pro Zoom + VFE enabled).
-        runCatching {
-            val thc = loader.loadClass("thc")
-            for (c in thc.declaredConstructors) {
-                module.hookCtor(c).intercept { chain ->
-                    once("thc", "Viewfinder extension (thc) created")
-                    chain.proceed()
-                }
-            }
-        }.onFailure { module.logMessage(Log.WARN, TAG, "thc diag failed: $it") }
-        // tmr.apply: case 1 = (zoom >= threshold), case 0 builds tnm.
-        runCatching {
-            val tmr = loader.loadClass("tmr")
-            val apply = tmr.getDeclaredMethod("apply", Any::class.java)
-            val bF = tmr.getDeclaredField("b").apply { isAccessible = true }
-            val aF = tmr.getDeclaredField("a").apply { isAccessible = true }
-            val tmuCls = loader.loadClass("tmu")
-            val thrF = tmuCls.getDeclaredField("b").apply { isAccessible = true }
-            module.hookMethod(apply).intercept { chain ->
-                val kind0 = runCatching { bF.getInt(chain.thisObject) }.getOrDefault(-1)
-                val r = chain.proceed()
-                val kind = kind0
-                if (kind == 0 || kind == 1) {
-                    val inp = chain.getArg(0).toString()
-                    if (inp.contains(Regex("\\b(2[5-9]|[3-9][0-9]|100)\\."))) once("tmr$kind:$inp:$r", "tmr[$kind]($inp) = $r")
-                }
-                r
-            }
-        }.onFailure { module.logMessage(Log.WARN, TAG, "tmr diag failed: $it") }
     }
 
     private fun hookFloat(loader: ClassLoader, cls: String, name: String, f: (Float) -> Float) {
