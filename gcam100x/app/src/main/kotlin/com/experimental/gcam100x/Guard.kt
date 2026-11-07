@@ -69,7 +69,13 @@ object Guard {
             val inModel = modelMarker.takeIf { it.exists() }?.readText()
             val inShot = shotMarker.takeIf { it.exists() }?.readText()
             modelMarker.delete(); shotMarker.delete()
-            if (inModel != null || inShot != null) {
+            val exit = lastExit()
+            if ((inModel != null || inShot != null) && exit?.second == false) {
+                // Android says the previous process did not crash (force stop,
+                // swipe away, ...): not counted against Google's path.
+                log("Guard: previous camera process ended in a Google Pro Zoom ${if (inModel != null) "model run" else "shot"} but was not a crash (${exit.first}); not counted")
+            } else if (inModel != null || inShot != null) {
+                exit?.let { log("Guard: Android exit record of the previous process: ${it.first}") }
                 consecutiveCrashes++
                 if (inModel != null) crashesInModel++ else crashesInShot++
                 crashedLastTime = if (inModel != null) "during Google's model run ($inModel)" else "during a Google Pro Zoom shot ($inShot)"
@@ -87,6 +93,25 @@ object Guard {
         }.onFailure { log("Guard: state unavailable: $it") }
         log("Guard: Google's Pro Zoom path ${if (googleEnabled) "on" else "off ($disabledReason)"}; " + summary())
     }
+
+    /**
+     * The newest exit record of this app: (description, was it a crash), or
+     * null if unavailable. Read through the system context, available before
+     * the app's own context exists.
+     */
+    private fun lastExit(): Pair<String, Boolean>? = runCatching {
+        val at = Class.forName("android.app.ActivityThread")
+        val thread = at.getMethod("currentActivityThread").invoke(null)
+        val ctx = at.getMethod("getSystemContext").invoke(thread) as android.content.Context
+        val am = ctx.getSystemService(android.app.ActivityManager::class.java)
+        val e = am.getHistoricalProcessExitReasons("com.google.android.GoogleCamera", 0, 1).firstOrNull() ?: return null
+        val crash = e.reason == android.app.ApplicationExitInfo.REASON_CRASH_NATIVE ||
+            e.reason == android.app.ApplicationExitInfo.REASON_CRASH ||
+            e.reason == android.app.ApplicationExitInfo.REASON_ANR ||
+            e.reason == android.app.ApplicationExitInfo.REASON_LOW_MEMORY ||
+            e.reason == android.app.ApplicationExitInfo.REASON_SIGNALED
+        "reason ${e.reason}, status ${e.status}, ${e.description ?: ""}" to crash
+    }.getOrNull()
 
     fun summary() = "model runs: $modelOk with output, $modelNoImage without output, crashes: $crashesInModel in model, " +
         "$crashesInShot elsewhere in the shot; last model run ${if (lastModelMs >= 0) "$lastModelMs ms" else "n/a"}"

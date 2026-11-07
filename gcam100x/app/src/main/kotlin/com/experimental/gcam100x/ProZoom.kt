@@ -311,7 +311,10 @@ object ProZoom {
                 log("Pro Zoom fusion: Google processor tna.c called (model initialized=$init, secondary RAW present=$raw)")
                 inProcessor = last
                 if (init && raw == true) last?.processorCalled = true
-                else log("Pro Zoom fusion: the model will NOT run for this shot (${if (!init) "model not initialized" else "no RAW frame"}); Google promotes the original")
+                else {
+                    log("Pro Zoom fusion: the model will NOT run for this shot (${if (!init) "model not initialized" else "no RAW frame"}); Google promotes the original")
+                    Guard.shotDone()
+                }
                 chain.proceed()
             }
             // What Google's processor delivers (myl = its result callback):
@@ -327,6 +330,7 @@ object ProZoom {
                     m.name == "e" && p.size == 1 -> module.hookMethod(m).intercept { chain ->
                         val sh = inProcessor ?: last
                         sh?.modelNoImage = true; sh?.resultTime = System.currentTimeMillis()
+                        Guard.shotDone()
                         log("Pro Zoom result: NO model output; Google promotes the original (shot #${sh?.id})"); chain.proceed()
                     }
                     m.name == "g" && p.size == 4 -> module.hookMethod(m).intercept { chain ->
@@ -334,6 +338,7 @@ object ProZoom {
                         val fromModel = chain.getArg(3) == 1
                         if (fromModel) sh?.modelDelivered = true else sh?.modelNoImage = true
                         sh?.resultTime = System.currentTimeMillis()
+                        if (!fromModel) Guard.shotDone()
                         log("Pro Zoom result: final image delivered (${if (fromModel) "Google's model output" else "fallback ${chain.getArg(3)}"}, shot #${sh?.id})")
                         chain.proceed()
                     }
