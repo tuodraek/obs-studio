@@ -47,10 +47,26 @@ object ProZoom {
     val GOOGLE_PRO_ZOOM get() = Guard.googleEnabled
 
     class Shot(val scale: Float, val zoom: Float, val time: Long) {
+        val id = ++counter
         @Volatile var consumed = false
-        /** Google's Pro Zoom processor received both inputs for this shot. */
-        @Volatile var googleRan = false
+        /** Went through Google's Pro Zoom (CENTAUR) pipeline. */
+        @Volatile var googleAttempt = false
+        /** Google's processor (tna.c) got the HDR+ image and the RAW frame. */
+        @Volatile var processorCalled = false
+        /** Google's native model returned an output image (delivered as final). */
+        @Volatile var modelDelivered = false
+        /** Google's native model returned without an image (original promoted). */
+        @Volatile var modelNoImage = false
+        @Volatile var modelMs = -1L
+        @Volatile var modelStatus = ""
+        /** Size of the first JPEG (Google's 30x original). */
+        @Volatile var originalSize: String? = null
+        @Volatile var finalDone = false
+        companion object { @Volatile var counter = 0 }
     }
+
+    /** Google Pro Zoom shots whose original was saved and whose final photo may still come. */
+    private val awaitingFinal = ConcurrentLinkedQueue<Shot>()
 
     private lateinit var module: MainHook
     @Volatile private var appContext: Context? = null
@@ -74,12 +90,14 @@ object ProZoom {
     private fun warn(msg: String) = module.logMessage(Log.WARN, TAG, msg)
 
     /** Shutter pressed with Pro Zoom active. */
+    fun lastShot(): Shot? = last
+
     fun onShot(scale: Float, zoom: Float): Shot? {
         if (scale <= 0f || scale >= 0.999f) return null
         val s = Shot(scale, zoom, System.currentTimeMillis())
         last = s
         shots.add(s)
-        log("ProZoom: shot at ${zoom}x (crop $scale)")
+        log("ProZoom: shot #${s.id} at ${zoom}x (crop $scale)")
         return s
     }
 
@@ -153,14 +171,30 @@ object ProZoom {
                 val vnk = bF.get(chain.thisObject)
                 val mime = runCatching { vnk.javaClass.getDeclaredField("e").apply { isAccessible = true }.get(vnk) as String }.getOrNull()
                 if (mime != "image/jpeg") return@intercept out
-                val shot = claimShot() ?: return@intercept out
-                Guard.shotSaved()
-                if (shot.googleRan) {
-                    log("ProZoom: ${shot.zoom}x photo from Google's Pro Zoom model, saved untouched")
-                    lastResult = "${shot.zoom.toInt()}× · Google Pro Zoom model"
-                    return@intercept out
+                val cr = aF.get(chain.thisObject) as android.content.ContentResolver
+                val uri = cF.get(chain.thisObject) as Uri
+                val shot = claimShot()
+                if (shot != null) {
+                    // First JPEG of a Pro Zoom shot. With Google's pipeline this is
+                    // the 30x original, saved before the model runs: crop it now so
+                    // the gallery shows the zoomed photo immediately.
+                    if (shot.googleAttempt) awaitingFinal.add(shot) else Guard.shotDone()
+                    log("ProZoom: shot #${shot.id}: ${if (shot.googleAttempt) "Google's original (saved before the model runs)" else "photo"} -> exact crop ($uri)")
+                    return@intercept ProZoomStream(out, cr, uri, shot, Kind.ORIGINAL)
                 }
-                ProZoomStream(out, aF.get(chain.thisObject) as android.content.ContentResolver, cF.get(chain.thisObject) as Uri, shot)
+                // A later JPEG of a Google Pro Zoom shot: its final photo.
+                val now = System.currentTimeMillis()
+                while (awaitingFinal.peek()?.let { it.finalDone || now - it.time > 180_000 } == true) awaitingFinal.poll()
+                val fin = awaitingFinal.poll() ?: return@intercept out
+                fin.finalDone = true
+                Guard.shotDone()
+                if (fin.modelDelivered) {
+                    log("ProZoom: shot #${fin.id}: final photo = Google's Pro Zoom model output ($uri)")
+                    ProZoomStream(out, cr, uri, fin, Kind.MODEL_OUTPUT)
+                } else {
+                    log("ProZoom: shot #${fin.id}: final photo = Google's promoted original (model gave no image) -> exact crop ($uri)")
+                    ProZoomStream(out, cr, uri, fin, Kind.ORIGINAL)
+                }
             }
             log("ProZoom: photo hook on vnn.g")
         }.onFailure { warn("ProZoom: photo hook failed: $it") }
@@ -190,19 +224,82 @@ object ProZoom {
             }
             val tna = loader.loadClass("tna")
             val iF = tna.getDeclaredField("i").apply { isAccessible = true }
+            val dF = tna.getDeclaredField("d").apply { isAccessible = true }
             val mys = loader.loadClass("mys")
             val rawF = mys.getDeclaredField("a").apply { isAccessible = true }
+            val tnz = loader.loadClass("tnz")
+            val zA = tnz.getDeclaredField("a").apply { isAccessible = true }
+            val zB = tnz.getDeclaredField("b").apply { isAccessible = true }
+            val zC = tnz.getDeclaredField("c").apply { isAccessible = true }
+            val zD = tnz.getDeclaredField("d").apply { isAccessible = true }
+            val zE = tnz.getDeclaredField("e").apply { isAccessible = true }
+            val hookedModel = Collections.synchronizedSet(HashSet<Class<*>>())
+            // Google's native model call: the real tnr implementation behind
+            // tna.d (tnq is only a stub). Hooked once its class is known.
+            fun hookModel(impl: Any) {
+                val cls = impl.javaClass
+                if (!hookedModel.add(cls)) return
+                val m = cls.declaredMethods.firstOrNull { it.name == "c" && it.parameterTypes.size == 4 && it.returnType == tnz }
+                if (m == null) { warn("Pro Zoom model: no model call on ${cls.name}"); return }
+                module.hookMethod(m).intercept { chain ->
+                    val shot = last
+                    val tag = "shot #${shot?.id} ${shot?.zoom}x"
+                    log("Pro Zoom model: START native model run ($tag) on ${cls.name}; ${Forensics.memory(appContext)}")
+                    Guard.modelStarted("$tag at ${java.text.SimpleDateFormat("HH:mm:ss").format(java.util.Date())}")
+                    val t0 = System.currentTimeMillis()
+                    val r = try { chain.proceed() } catch (t: Throwable) {
+                        Guard.modelReturned(false, System.currentTimeMillis() - t0)
+                        warn("Pro Zoom model: native model run THREW after ${System.currentTimeMillis() - t0} ms: ${Log.getStackTraceString(t)}")
+                        throw t
+                    }
+                    val ms = System.currentTimeMillis() - t0
+                    val status = runCatching { zA.getInt(r) }.getOrDefault(-1)
+                    val handle = runCatching { zB.getLong(r) }.getOrDefault(0L)
+                    val c = runCatching { zC.getFloat(r) }.getOrDefault(Float.NaN)
+                    val d = runCatching { zD.getInt(r) }.getOrDefault(-1)
+                    val e = runCatching { zE.getInt(r) }.getOrDefault(-1)
+                    val got = handle != 0L
+                    Guard.modelReturned(got, ms)
+                    shot?.modelMs = ms
+                    shot?.modelStatus = "status=$status image=${if (got) "yes" else "no"} score=$c d=$d e=$e"
+                    log("Pro Zoom model: END after $ms ms ($tag): status=$status, output image=${if (got) "YES (handle $handle)" else "NO"}, " +
+                        "value=$c, d=$d, e=$e; ${Forensics.memory(appContext)}")
+                    r
+                }
+                log("Pro Zoom model: hooked Google's native model call ${cls.name}.c")
+            }
             val c = tna.declaredMethods.first { it.name == "c" && it.parameterTypes.size == 7 }
             module.hookMethod(c).intercept { chain ->
                 val init = runCatching { iF.getBoolean(chain.thisObject) }.getOrDefault(false)
                 // mys.a: (desugared) Optional<RawReadView>
                 val raw = runCatching { rawF.get(chain.getArg(3))?.let { it.javaClass.getMethod("isPresent").invoke(it) as Boolean } }.getOrNull()
+                runCatching { dF.get(chain.thisObject)?.let { hookModel(it) } }.onFailure { warn("Pro Zoom model: hook failed: $it") }
                 log("Pro Zoom fusion: Google processor tna.c called (model initialized=$init, secondary RAW present=$raw)")
-                if (init && raw == true) last?.googleRan = true
-                val t0 = System.currentTimeMillis()
-                val r = chain.proceed()
-                log("Pro Zoom fusion: tna.c returned in ${System.currentTimeMillis() - t0} ms (processing continues async)")
-                r
+                if (init && raw == true) last?.processorCalled = true
+                else log("Pro Zoom fusion: the model will NOT run for this shot (${if (!init) "model not initialized" else "no RAW frame"}); Google promotes the original")
+                chain.proceed()
+            }
+            // What Google's processor delivers (myl = its result callback):
+            //  d = original saved before the model runs, g(.., 1) = model output
+            //  as the final photo, e = no output, original promoted.
+            val myl = loader.loadClass("myl")
+            for (m in myl.declaredMethods) {
+                val p = m.parameterTypes
+                when {
+                    m.name == "d" && p.size == 3 -> module.hookMethod(m).intercept { chain ->
+                        log("Pro Zoom result: original saved before the model runs (shot #${last?.id})"); chain.proceed()
+                    }
+                    m.name == "e" && p.size == 1 -> module.hookMethod(m).intercept { chain ->
+                        last?.modelNoImage = true
+                        log("Pro Zoom result: NO model output; Google promotes the original (shot #${last?.id})"); chain.proceed()
+                    }
+                    m.name == "g" && p.size == 4 -> module.hookMethod(m).intercept { chain ->
+                        val fromModel = chain.getArg(3) == 1
+                        if (fromModel) last?.modelDelivered = true else last?.modelNoImage = true
+                        log("Pro Zoom result: final image delivered (${if (fromModel) "Google's model output" else "fallback ${chain.getArg(3)}"}, shot #${last?.id})")
+                        chain.proceed()
+                    }
+                }
             }
             // Per-shot fusion mode decision: CENTAUR (myu.h) feeds Google's model.
             val mye = loader.loadClass("mye")
@@ -238,12 +335,15 @@ object ProZoom {
         }.onFailure { warn("ProZoom: Google pipeline hooks failed: $it") }
     }
 
+    private enum class Kind { ORIGINAL, MODEL_OUTPUT }
+
     /** Buffers Google Camera's JPEG; on close writes the Pro Zoom photo instead. */
     private class ProZoomStream(
         private val target: FileOutputStream,
         private val cr: android.content.ContentResolver,
         private val uri: Uri,
         private val shot: Shot,
+        private val kind: Kind,
     ) : FileOutputStream(target.fd) {
         private val buf = ByteArrayOutputStream(8 shl 20)
         private var closed = false
@@ -256,7 +356,7 @@ object ProZoom {
             closed = true
             var bytes = buf.toByteArray()
             if (bytes.isEmpty()) runCatching { bytes = cr.openInputStream(uri)!!.use { it.readBytes() } }
-            val result = try { render(bytes, shot) } catch (t: Throwable) {
+            val result = try { finish(bytes, shot, kind) } catch (t: Throwable) {
                 module.logMessage(Log.WARN, TAG, "ProZoom: render failed, keeping the original: ${Log.getStackTraceString(t)}")
                 bytes
             }
@@ -273,8 +373,32 @@ object ProZoom {
 
     // --- Rendering -------------------------------------------------------
 
+    private fun dims(jpeg: ByteArray): String {
+        val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, o)
+        return "${o.outWidth}x${o.outHeight}"
+    }
+
+    private fun finish(jpeg: ByteArray, shot: Shot, kind: Kind): ByteArray {
+        if (kind == Kind.ORIGINAL) {
+            if (shot.originalSize == null) shot.originalSize = dims(jpeg)
+            return render(jpeg, shot)
+        }
+        // Google's model output. It is the Pro Zoom result; if it has exactly
+        // the size of the 30x original it is not zoomed yet: crop it.
+        val d = dims(jpeg)
+        return if (d == shot.originalSize) {
+            log("ProZoom: shot #${shot.id}: model output is $d, the same size as the 30x original: cropping it to ${shot.zoom}x")
+            render(jpeg, shot, "Google's model output, cropped")
+        } else {
+            lastResult = "${shot.zoom.toInt()}× · ENHANCED by Google's Pro Zoom model · $d · model ${shot.modelMs} ms"
+            log("ProZoom: shot #${shot.id}: saved Google's Pro Zoom model output untouched ($d, ${jpeg.size / 1024} KB, model ${shot.modelMs} ms)")
+            jpeg
+        }
+    }
+
     /** Centre crop of [jpeg] to the shot's zoom at native resolution, original EXIF kept. */
-    fun render(jpeg: ByteArray, shot: Shot): ByteArray {
+    fun render(jpeg: ByteArray, shot: Shot, what: String? = null): ByteArray {
         val t0 = System.currentTimeMillis()
         val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, o)
@@ -285,10 +409,14 @@ object ProZoom {
         val dec = BitmapRegionDecoder.newInstance(jpeg, 0, jpeg.size, false)!!
         val region = dec.decodeRegion(Rect(left, top, left + cw, top + ch), null)
         dec.recycle()
-        // Google's Pro Zoom model did not process this shot: the exact crop
-        // at its native resolution (no upscaler).
+        // The exact crop at its native resolution (no upscaler).
         val outBmp = region
-        val mode = "exact crop; Google's model did not run"
+        val mode = what ?: when {
+            !shot.googleAttempt -> "exact crop (Google's Pro Zoom path off)"
+            shot.modelNoImage -> "exact crop; Google's model returned no image"
+            shot.modelDelivered -> "exact crop of the original; Google's output follows"
+            else -> "exact crop of Google's original; model still running"
+        }
         val enc = ByteArrayOutputStream(4 shl 20)
         outBmp.compress(Bitmap.CompressFormat.JPEG, 95, enc)
         val size = "${outBmp.width}x${outBmp.height}"
@@ -316,7 +444,9 @@ object ProZoom {
 
     /** First camera activity: keep its context. */
     fun register(ctx: Context) {
-        if (appContext == null) appContext = ctx.applicationContext
+        if (appContext != null) return
+        appContext = ctx.applicationContext
+        worker.post { Forensics.report(ctx.applicationContext) { pr, msg -> module.logMessage(pr, TAG, msg) } }
     }
 
     private val EXIF_TAGS = arrayOf(

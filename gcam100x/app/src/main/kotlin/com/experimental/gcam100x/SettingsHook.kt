@@ -95,8 +95,11 @@ class SettingsHook(private val module: MainHook) {
             appendLine("  Pro Zoom model download (centaur_p26): ${ProZoom.modelState ?: "not checked yet"}")
             appendLine("  Framing: centre crop, the same as the viewfinder (Google Camera's own Pro Zoom crop)")
             appendLine("  Preview stabilization above 30×: off (no drift)")
-            appendLine("  Processing: Google's Pro Zoom model when it runs; otherwise the exact crop")
-            appendLine("  Google's Pro Zoom path: ${if (Guard.googleEnabled) "on" else "off — ${Guard.lastCrash ?: "disabled"}"}")
+            appendLine("  Processing: Google's Pro Zoom model (CENTAUR) when it delivers; otherwise the exact crop")
+            appendLine("  Google's Pro Zoom path: ${if (Guard.googleEnabled) "on" else "off — ${Guard.disabledReason ?: "disabled"}"}")
+            appendLine("  Google model: ${Guard.summary()}")
+            Guard.crashedLastTime?.let { appendLine("  Previous camera session ended $it") }
+            Forensics.lastExit?.let { appendLine("  Last camera exit: $it") }
             appendLine("  Last photo: ${ProZoom.lastResult ?: "none yet"}")
             appendLine()
             appendLine("Log: ${log ?: "not available"}")

@@ -228,6 +228,7 @@ class SliderHook(private val module: MainHook) {
                 }
                 if (active) {
                     module.logMessage(Log.INFO, TAG, "Shot: Google Pro Zoom (CENTAUR) capture, ${proShot?.zoom}x")
+                    proShot?.googleAttempt = true
                     Guard.shotStarted("${proShot?.zoom}x at ${java.text.SimpleDateFormat("HH:mm:ss").format(java.util.Date())}")
                 }
                 val r = chain.proceed()
