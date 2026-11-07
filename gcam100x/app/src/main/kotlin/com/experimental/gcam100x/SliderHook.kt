@@ -206,8 +206,10 @@ class SliderHook(private val module: MainHook) {
                         val b = tnm.getDeclaredField("b").getBoolean(t)
                         val z = tnm.getDeclaredField("c").getFloat(t)
                         val sc = tnm.getDeclaredField("d").getFloat(t)
-                        if (b) ProZoom.onShot(sc, z)
-                        else if (lastZoom > 30f && System.currentTimeMillis() - lastZoomTime < 5000) ProZoom.onShot(30f / lastZoom, lastZoom)
+                        val shot = if (b) ProZoom.onShot(sc, z)
+                            else if (lastZoom > 30f && System.currentTimeMillis() - lastZoomTime < 5000) ProZoom.onShot(30f / lastZoom, lastZoom)
+                            else null
+                        if (shot != null) ProZoom.pclShots[chain.thisObject] = shot
                     }
                 }
                 // Keep the still on Google Camera's normal 30x HDR+ / Night Sight

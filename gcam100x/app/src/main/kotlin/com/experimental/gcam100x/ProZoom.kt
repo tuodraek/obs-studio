@@ -71,8 +71,11 @@ object ProZoom {
     private fun log(msg: String) = module.logMessage(Log.INFO, TAG, msg)
 
     /** A shot was taken with Pro Zoom state (active, zoom, scale). */
-    fun onShot(scale: Float, zoom: Float) {
-        if (scale <= 0f || scale >= 0.999f) return
+    /** Pro Zoom shot per Google Camera shot-params object (pcl). */
+    val pclShots: MutableMap<Any, Shot> = Collections.synchronizedMap(java.util.WeakHashMap())
+
+    fun onShot(scale: Float, zoom: Float): Shot? {
+        if (scale <= 0f || scale >= 0.999f) return null
         val s = Shot(scale, zoom, System.currentTimeMillis())
         s.view = lastView?.takeIf { kotlin.math.abs(it.time - s.time) < 400 }
         last = s
@@ -80,6 +83,7 @@ object ProZoom {
         shots.add(s)
         log("ProZoom: shot at ${zoom}x (scale $scale), viewfinder frame ${s.view?.let { "${it.gray.w}x${it.gray.h} captured" } ?: "not yet"}")
         worker.postDelayed({ fallbackScan() }, 20_000)
+        return s
     }
 
     @Volatile var activity: java.lang.ref.WeakReference<android.app.Activity>? = null
@@ -167,6 +171,32 @@ object ProZoom {
             log("ProZoom: save-pipeline hook on vnn.g()")
             hookThumbnailView(loader)
         }.onFailure { module.logMessage(Log.WARN, TAG, "ProZoom: vnn hook failed: $it") }
+        // The shot thumbnail at its source: rah.ak (intermediate thumbnail,
+        // shown first) and rah.aj (capture-indicator thumbnail). Google Camera
+        // itself crops aj to Pro Zoom (sxh.r) when the shot carries an active
+        // Pro Zoom state; this module keeps the shot on normal HDR+, so it is
+        // done here, for both. Every later consumer (thumbnail button,
+        // gallery preview, Photos processing preview) gets this bitmap.
+        runCatching {
+            val rah = loader.loadClass("rah")
+            val pclF = rah.declaredFields.first { it.type.name == "pcl" }.apply { isAccessible = true }
+            fun shotOf(o: Any?): Shot? = runCatching { pclF.get(o) }.getOrNull()?.let { pclShots[it] }
+            val aj = rah.declaredMethods.first { it.name == "aj" && it.parameterTypes.size == 2 && it.parameterTypes[0] == Bitmap::class.java }
+            module.hookMethod(aj).intercept { chain ->
+                val shot = shotOf(chain.thisObject)
+                val bmp = chain.getArg(0) as? Bitmap
+                if (shot == null || bmp == null) return@intercept chain.proceed()
+                chain.proceed(arrayOf(frameAtSource(bmp, shot, "capture"), chain.getArg(1)))
+            }
+            val ak = rah.declaredMethods.first { it.name == "ak" && it.parameterTypes.size == 1 && it.parameterTypes[0] == Bitmap::class.java }
+            module.hookMethod(ak).intercept { chain ->
+                val shot = shotOf(chain.thisObject)
+                val bmp = chain.getArg(0) as? Bitmap
+                if (shot == null || bmp == null) return@intercept chain.proceed()
+                chain.proceed(arrayOf(frameAtSource(bmp, shot, "intermediate")))
+            }
+            log("ProZoom: thumbnail source hooks on rah.aj()/rah.ak()")
+        }.onFailure { module.logMessage(Log.WARN, TAG, "ProZoom: rah hooks failed: $it") }
         // Shot thumbnail. Google Camera hands it out in two places:
         //  - rbl.g(shot, bitmap, rotation): dispatched straight to every shot
         //    listener (thumbnail button, the gallery's first image, shutter
@@ -262,6 +292,18 @@ object ProZoom {
             }
             log("ProZoom: thumbnail view hook on ThumbnailView.b()")
         }.onFailure { module.logMessage(Log.WARN, TAG, "ProZoom: ThumbnailView hook failed: $it") }
+    }
+
+    /** Pro Zoom crop of a shot thumbnail at its source (crop only, like Google Camera's own). */
+    private fun frameAtSource(bmp: Bitmap, shot: Shot, what: String): Bitmap {
+        if (bmp.isRecycled || ours.containsKey(bmp)) return bmp
+        val t0 = System.nanoTime()
+        val (r, how) = frame(bmp.width, bmp.height, shot, null)
+        val out = Bitmap.createBitmap(bmp, r.left, r.top, r.width().coerceAtLeast(2), r.height().coerceAtLeast(2))
+        ours[out] = true
+        runCatching { if (shot.sigIn == null) { shot.sigIn = Align.gray(bmp, 96); shot.sigOut = Align.gray(out, 96) } }
+        log("ProZoom: $what thumbnail ${bmp.width}x${bmp.height} -> ${out.width}x${out.height} at the source in ${(System.nanoTime() - t0) / 1000} us ($how)")
+        return out
     }
 
     /** Bitmaps this module produced (already Pro Zoom framed). */
