@@ -74,3 +74,23 @@ Obtained from Google Play with a Pixel 10 Pro (`blazer`) device profile: `split_
 | 5f923d6a… | 682 B | gldm pipeline config | — |
 
 Chip families: 25 = `buenos` (Tensor G5), 26 = `santafe` (Tensor G6). The G4's executables are `rio_a0`.
+
+## The G4 crash (two tombstones, identical)
+`SIGSEGV`/`SEGV_MAPERR`, null pointer read, thread `GcaGeneric-*`, in libgcastartup.so (BuildId `dcec58ae3422114fadc933c1c8a6331c`):
+
+```
+#00 0x78016dc  std::string %s formatter: ldrb w9,[x0], with x0 = 0
+#01 0x78016b8
+#02-#04 0x7802650 / 0x78020f4 / 0x78023d8  string formatting
+#05 0x55d0024  ModelRunner::Run (0x55cffc4) formats "ModelRunner::Run:%s" with this->[0x10]->[0x38] (protobuf string, tag bits masked)
+#06 0x55ae04c  super_resolution_diffuser.cc, Inference: virtual call into the model runner
+#07-#14 ...
+#15 Java_com_google_android_apps_camera_zoomplus_jni_NativeZoomPlus_nativeRunZoomPlusPipeline+520
+#18 com.google.android.apps.camera.zoomplus.jni.NativeZoomPlus.c
+```
+
+On the G4, one model runner of the diffusion super-resolver has a null name (unconfigured runner config). The crash happens before the runner executes anything, so the TPU has not run the model at this point. It is the same with the p25 and p26 packages.
+
+GCam100x 4.1.0 adds a native part (`native/gcam100x_native.c`, loaded via `META-INF/xposed/native_init.list`). It acts only on that exact BuildId:
+- it guards the formatter against a null string;
+- it logs every `ModelRunner::Run` (runner, config, name, caller) through a register-preserving stub.
