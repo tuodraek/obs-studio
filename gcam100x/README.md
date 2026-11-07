@@ -14,21 +14,29 @@ Boost without hooking anything twice.
 
 ## What it does
 
-Turns on Google Camera 11.1's own Pro Zoom UI (slider, label, viewfinder
-crop) up to 120× on a Pixel 9 Pro XL. The camera hardware stops at 30×, so
-past 30× the photo is the same centre crop the viewfinder shows:
+Turns on Google Camera 11.1's own Pro Zoom (CENTAUR) on a Pixel 9 Pro XL:
+slider, label and viewfinder up to 120×, and Google's own Pro Zoom model.
 
-- **Capture:** Google Camera's normal 30× HDR+ / Night Sight path (the Pro Zoom
-  CENTAUR capture expects Google's model, which cannot run here).
-- **Thumbnail:** cropped where Google Camera creates it (`rah.ak` / `rah.aj`),
-  the same place Google Camera's own Pro Zoom crops it.
-- **Photo:** the JPEG is cropped and rebuilt with Real-ESRGAN (x4 general,
-  denoise 0.5, GPU) inside the save pipeline, before the gallery entry is
-  published. The gallery never has the 30× image.
-- Preview stabilization is off while Pro Zoom is active (no drift).
-
-Settings → GCam100x (last entry) shows versions, the last photo's timing, a
-"Copy log" button and the startup toast switch.
+- **Pro Zoom UI:** slider gates (`kkp.j`, `ub.i`), Pro Zoom state (`tmp.o`),
+  level (`tmu.a`), Pro Zoom / CENTAUR flags, manifest for `centaur_p26`.
+- **Google's pipeline:** `camera.enable_boba_jelly_lobster` turns on Google
+  Camera's fusion stack (`myq.b()` → real fusion selector `mye`, processor host
+  `myo`), so Pro Zoom shots are processed in CENTAUR fusion mode: HDR+ image +
+  RAW frame → Google's Pro Zoom processor (`tna.c`) → native model (`tnr.c`).
+- **Photo:** Google saves the 30× original first; the module crops it to the
+  zoom immediately (the gallery never shows 30×). If the model delivers an
+  image it replaces it untouched (cropped only if it is still the size of the
+  30× original); if not, the promoted original is cropped.
+- **Thumbnail:** cropped where Google Camera creates it (`rah.ak`, `rah.aj`).
+- **Crash guard (`Guard`):** markers around the native model run; after 2
+  consecutive crashes Google's path is switched off (normal HDR+ + exact crop)
+  until re-armed in Settings.
+- **Forensics:** at every start, Android's exit records for Google Camera
+  (reason, memory, readable crash report); memory snapshots around model runs.
+- **Log:** `/data/user/0/com.google.android.GoogleCamera/files/gcam100x.log`,
+  flushed per line, sessions kept; per-shot history with the final verdict
+  (ENHANCED by Google's model / why not). Settings → GCam100x shows it all
+  and copies the log.
 
 ## Build
 

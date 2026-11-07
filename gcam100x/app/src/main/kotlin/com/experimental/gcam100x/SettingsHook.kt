@@ -100,8 +100,12 @@ class SettingsHook(private val module: MainHook) {
             appendLine("  Google model: ${Guard.summary()}")
             Guard.crashedLastTime?.let { appendLine("  Previous camera session ended $it") }
             Forensics.lastExit?.let { appendLine("  Last camera exit: $it") }
+            appendLine()
+            appendLine("Last photos")
+            ProZoom.history(8).ifEmpty { listOf("none yet") }.forEach { appendLine("  $it") }
             appendLine("  Last photo: ${ProZoom.lastResult ?: "none yet"}")
             appendLine()
+            appendLine("Diagnostics: ${module.hookCount()} hooks installed")
             appendLine("Log: ${log ?: "not available"}")
             log?.let { appendLine("  ${File(it).length() / 1024} KB") }
         }

@@ -31,51 +31,67 @@ class MainHook : XposedModule() {
         ZoomHook(this).install()
         SliderHook(this).install(param)
         SettingsHook(this).install(param)
+        logMessage(Log.INFO, TAG, "Startup complete: ${hookCount()} hooks installed")
+        logMessage(Log.INFO, TAG, "Hooks: " + synchronized(hooks) { hooks.groupingBy { it }.eachCount().entries.joinToString { (k, v) -> if (v > 1) "$k x$v" else k } })
     }
 
-    fun hookMethod(method: Method) = hook(method)
-    fun hookCtor(c: java.lang.reflect.Constructor<*>) = hook(c)
+    // --- Hooks: every installed hook is counted and listed in the log -------
 
-    /** LSPosed/Vector mirrors module logs to logcat under the same tag. */
+    private val hooks = java.util.Collections.synchronizedList(ArrayList<String>())
+    fun hookMethod(method: Method) = hook(method).also { hooks.add("${method.declaringClass.name}.${method.name}") }
+    fun hookCtor(c: java.lang.reflect.Constructor<*>) = hook(c).also { hooks.add("${c.declaringClass.name}.<init>") }
+    fun hookCount() = hooks.size
+
+    // --- Log -----------------------------------------------------------------
+    //
+    // One file in Google Camera's own data dir, written synchronously and
+    // flushed per line, so the last lines before a native crash are on disk.
+    // Previous sessions are kept (rolled at 3 MB, keeping the newest 1 MB).
+    // Also mirrored to logcat (tag GCam100x) by LSPosed/Vector.
+
+    @Volatile private var logOut: java.io.FileOutputStream? = null
     @Volatile private var logFile: java.io.File? = null
     fun logFilePath(): String? = logFile?.absolutePath
     private val pending = ArrayList<String>()
     @Volatile var lastError: String? = null
-    private val writer = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "gcam100x-log").apply { isDaemon = true } }
+    private val stamp = java.text.SimpleDateFormat("MM-dd HH:mm:ss.SSS", java.util.Locale.US)
 
-    /** Called once an Activity exists: log to /sdcard/Android/data/<camera>/files/gcam100x.log. */
-    fun attachLogFile(f: java.io.File) {
-        synchronized(this) {
-            if (logFile != null) return
-            try {
-                f.parentFile?.mkdirs()
-                // Keep the previous session (the one before a crash), drop older ones.
-                val prev = if (f.exists()) f.readText().let { t -> t.substring(maxOf(0, t.length - 300_000)) } else ""
-                f.writeText(prev + "\n===== new camera session =====\n" + pending.joinToString(""))
-                pending.clear()
-                logFile = f
-            } catch (t: Throwable) {
-                lastError = t.toString()
-            }
+    private fun open(f: java.io.File): Boolean = try {
+        f.parentFile?.mkdirs()
+        if (f.exists() && f.length() > 3_000_000) {
+            val t = f.readBytes()
+            f.writeBytes(t.copyOfRange(t.size - 1_000_000, t.size))
         }
+        val out = java.io.FileOutputStream(f, true)
+        val head = StringBuilder("\n===== camera session ${stamp.format(java.util.Date())} pid ${android.os.Process.myPid()} · GCam100x ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) · " +
+            "${android.os.Build.MODEL} (${android.os.Build.DEVICE}) Android ${android.os.Build.VERSION.RELEASE} ${android.os.Build.ID} =====\n")
+        for (l in pending) head.append(l)
+        pending.clear()
+        out.write(head.toString().toByteArray()); out.flush()
+        logOut = out; logFile = f
+        true
+    } catch (t: Throwable) { lastError = t.toString(); false }
+
+    /** Called once an Activity exists, if the data-dir log could not be opened at start. */
+    fun attachLogFile(f: java.io.File) {
+        synchronized(this) { if (logOut == null) open(f) }
     }
 
     fun logMessage(priority: Int, tag: String, msg: String) {
         runCatching { log(priority, tag, msg) }
-        // Also keep our own log in the camera's data dir (logcat buffers
-        // roll over too fast): /data/data/com.google.android.GoogleCamera/files/gcam100x.log
-        if (msg.startsWith("Property read") || msg.startsWith("Feature query")) return
-        val line = "${java.text.SimpleDateFormat("HH:mm:ss.SSS").format(java.util.Date())} $msg\n"
+        val level = when (priority) { Log.ERROR -> "E"; Log.WARN -> "W"; else -> "I" }
+        val line = "${stamp.format(java.util.Date())} $level [${Thread.currentThread().name}] $msg\n"
         synchronized(this) {
-            val f = logFile
-            if (f == null) {
-                if (pending.size < 5000) pending.add(line)
-            } else {
-                // Written off the calling thread (never block the camera).
-                writer.execute { if (f.length() < 4_000_000) runCatching { f.appendText(line) }.onFailure { lastError = it.toString() } }
+            if (logOut == null && logFile == null && !triedDataDir) {
+                triedDataDir = true
+                open(java.io.File("/data/user/0/$TARGET_PACKAGE/files/gcam100x.log"))
             }
+            val out = logOut
+            if (out == null) { if (pending.size < 5000) pending.add(line); return }
+            try { out.write(line.toByteArray()); out.flush() } catch (t: Throwable) { lastError = t.toString() }
         }
     }
+    private var triedDataDir = false
 
     companion object {
         const val TAG = "GCam100x"

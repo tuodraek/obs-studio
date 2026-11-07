@@ -83,7 +83,9 @@ object Guard {
     fun modelStarted(desc: String) { runCatching { dir.mkdirs(); modelMarker.writeText(desc) } }
 
     fun modelReturned(gotImage: Boolean, ms: Long) {
-        runCatching { modelMarker.delete() }
+        // The model run is the risky part; once it returned, a later exit is
+        // not counted against Google's path.
+        runCatching { modelMarker.delete(); shotMarker.delete() }
         if (gotImage) modelOk++ else modelNoImage++
         lastModelMs = ms
         consecutiveCrashes = 0
