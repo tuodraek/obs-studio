@@ -36,6 +36,11 @@ class FlagHook(private val module: MainHook) {
             // (boba_jelly_ext_level = 120). Both are false on this phone.
             "camera.enable_boba_jelly_vfe",
             "camera.boba_jelly_ext",
+            // Pro Zoom capture + fusion (tmu.c() = boba_jelly && eligible &&
+            // lobster). Without it Google Camera disables its whole fusion
+            // stack (myq.b() false -> dummy fusion selector, no myo), so
+            // Google's Pro Zoom processor (tna.c) never gets a photo.
+            "camera.enable_boba_jelly_lobster",
         )
 
         /** Numeric flags to override (value type and Optional wrapping are preserved). */
