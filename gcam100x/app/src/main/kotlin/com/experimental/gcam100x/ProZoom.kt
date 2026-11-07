@@ -76,6 +76,10 @@ object ProZoom {
         last = s
         shots.add(s)
         log("ProZoom: shot at ${zoom}x (crop $scale)")
+        // Load the upscaler now (first Pro Zoom shot only), in parallel with
+        // Google Camera's own HDR+ processing: nothing touches the GPU while
+        // the camera is just previewing.
+        worker.post { runCatching { sr.warmUp() }.onFailure { warn("ProZoom: upscaler load failed: $it") } }
         return s
     }
 
@@ -268,11 +272,9 @@ object ProZoom {
         } finally { tmp.delete() }
     }
 
-    /** First camera activity: keep its context; load the upscaler once the camera has settled. */
+    /** First camera activity: keep its context. */
     fun register(ctx: Context) {
-        if (appContext != null) return
-        appContext = ctx.applicationContext
-        worker.postDelayed({ runCatching { sr.warmUp() }.onFailure { warn("ProZoom: upscaler warm-up failed: $it") } }, 4_000)
+        if (appContext == null) appContext = ctx.applicationContext
     }
 
     private val EXIF_TAGS = arrayOf(

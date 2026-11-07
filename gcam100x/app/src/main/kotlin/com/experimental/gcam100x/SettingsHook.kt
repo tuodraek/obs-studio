@@ -98,7 +98,7 @@ class SettingsHook(private val module: MainHook) {
             appendLine("  Detail: Real-ESRGAN x4 general (denoise 0.5), luminance only, native crop resolution")
             appendLine("    float on GPU (Edge TPU int8 degrades this model)")
             appendLine("  Backend: ${ProZoom.sr.backend}")
-            appendLine("  Tile benchmark: ${ProZoom.sr.benchmark ?: "runs when the camera opens"}")
+            appendLine("  Tile benchmark: ${ProZoom.sr.benchmark ?: "loads with the first Pro Zoom photo"}")
             appendLine("  Last photo: ${ProZoom.lastResult ?: "none yet"}")
             appendLine()
             appendLine("Log: ${log ?: "not available"}")
