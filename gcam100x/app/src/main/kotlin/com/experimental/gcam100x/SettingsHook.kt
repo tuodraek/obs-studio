@@ -96,7 +96,8 @@ class SettingsHook(private val module: MainHook) {
             appendLine("  Model download: ${ProZoom.modelState ?: "not checked yet"}")
             appendLine("  Framing: centre crop, the same as the viewfinder (Google Camera's own Pro Zoom crop)")
             appendLine("  Preview stabilization above 30×: off (no drift)")
-            appendLine("  Processing: Google's Pro Zoom model (CENTAUR) when it delivers; otherwise the exact crop")
+            appendLine("  Processing: ${if (Guard.googleEnabled) "Google's Pro Zoom pipeline (CENTAUR); its photo is kept exactly as Google makes it, ENHANCED when its model delivers"
+                else "normal HDR+ photo + exact crop at native resolution"}")
             appendLine("  Google's Pro Zoom path: ${if (Guard.googleEnabled) "on" else "off — ${Guard.disabledReason ?: "disabled"}"}")
             appendLine("  Google model: ${Guard.summary()}")
             Guard.crashedLastTime?.let { appendLine("  Previous camera session ended $it") }
@@ -150,10 +151,13 @@ class SettingsHook(private val module: MainHook) {
     private fun copyLog(ctx: Context, header: String) {
         val path = module.logFilePath()
         val body = runCatching {
-            val f = File(path!!)
-            // Clipboard limit: keep the last ~400 KB.
-            val bytes = f.readBytes()
-            String(if (bytes.size > 400_000) bytes.copyOfRange(bytes.size - 400_000, bytes.size) else bytes)
+            // The newest camera sessions only (the last 3 session starts), at
+            // most ~250 KB, so a paste is about the current version.
+            val all = String(File(path!!).readBytes())
+            val starts = Regex("GCam100x [0-9][^\n]* starting in").findAll(all).map { it.range.first }.toList()
+            var from = if (starts.size > 3) all.lastIndexOf('\n', starts[starts.size - 3]).coerceAtLeast(0) else 0
+            if (all.length - from > 250_000) from = all.length - 250_000
+            all.substring(from)
         }.getOrElse { "Log unavailable: $it" }
         val cm = ctx.getSystemService(ClipboardManager::class.java)
         cm.setPrimaryClip(ClipData.newPlainText("GCam100x log", header + "\n----\n" + body))

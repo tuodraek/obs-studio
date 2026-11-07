@@ -94,3 +94,45 @@ On the G4, one model runner of the diffusion super-resolver has a null name (unc
 GCam100x 4.1.0 adds a native part (`native/gcam100x_native.c`, loaded via `META-INF/xposed/native_init.list`). It acts only on that exact BuildId:
 - it guards the formatter against a null string;
 - it logs every `ModelRunner::Run` (runner, config, name, caller) through a register-preserving stub.
+
+## Pipeline result status (decoded in 5.1.0)
+
+`Java_…_NativeZoomPlus_nativeRunZoomPlusPipeline` (`0x2a9e1f4`) builds the
+`ZoomPlusPipelineResponse` (Java `tnz`) on its stack at `sp+0x70`: has-bits at
+`+0x10`, `b` (image handle) at `+0x18`, `a` (status) at `+0x20`, `c`/`d`/`e`
+after it. After the pipeline call (`bl 0x2aa11ac`, result in `x0`):
+
+```
+2a9e404  mov  w10, #1
+2a9e408  cmn  x0, #1          ; handle == -1 ?
+2a9e410  cinc w10, w10, eq    ; status = (handle == -1) ? 2 : 1
+2a9e420  str  x0,  [sp,#0x88] ; b = handle
+2a9e424  str  w10, [sp,#0x90] ; a = status
+```
+
+The error path at `0x2a9e650` (`zoom_plus_jni: Unable to marshal …`) also
+sets status 2. So **status 2 = no image** (handle -1, which `aaau.a()` never
+maps to an image). `tmx` then logs "Final image not found. Promoting already
+saved secondary original image to primary", calls `FusionProgressCallback.e`,
+and Google keeps the photo it already saved. The 4.0/4.1 runs on the G4
+(862 ms, status 2) gave no model output.
+
+`ModelRunner::Run` (`0x55cffc4`), after the trace string, calls the runner's
+`IsReady` (vtable `+0x28`). When that returns false, it fails with
+"Inference Runner is not ready." (`model_runner.cc:243`). The null config
+name that crashed 3.x/4.0 is that runner's config, which was never filled
+in: the runner was never initialized. Google's own message for that
+(`InitInferenceRunners: %s`, `ModelRunner::Initialize: %s`, DarwinN driver
+errors) goes to logcat. Since 5.1.0 the native part captures it (liblog
+`__android_log_write_log_message`) and the per-photo verdict shows it.
+
+Engines in the diffusion code: `DarwinnInferenceRunner` (TPU),
+`MlDriftInferenceRunner` (GPU) and `TfLiteInferenceRunner`. The Pro Zoom
+package ships only TPU programs (`edgetpu-custom-op-2` + DGC0, family 25/26),
+so there is no GPU model to select.
+
+Google's own crop: with an active Pro Zoom state on the shot (`pcl.n.b`) and
+no high-res (`!pcl.k`), Google's pipeline writes the photo already zoomed
+(4.1.0 device run: 1536x2040 = 6144x8160 x 0.25) and crops the capture
+thumbnail (`rah.aj` → `sxh.r`). The intermediate thumbnail (`rah.ak`, from
+`ofv`/`pha` via `pnw.p`) is not cropped by Google.

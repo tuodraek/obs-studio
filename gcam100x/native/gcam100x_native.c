@@ -13,14 +13,21 @@
 //     (and is logged with its caller), so the camera does not crash there;
 //  2. hooks ModelRunner::Run with a register-preserving stub that logs the
 //     runner, its config pointer and name pointer before the call proceeds.
-// Nothing is touched unless the loaded libgcastartup.so has exactly that
-// BuildId.
+//  3. captures Google's own native log messages (liblog) into the module's
+//     log: every warning/error of the process, and everything (info and up)
+//     while Google's Pro Zoom model runs (the Java side marks that window with
+//     the file gcam100x_model_running). Messages of the model window are also
+//     written to gcam100x_model_messages, so the per-photo verdict can show
+//     Google's own reason when its model gives no output.
+// 1 and 2 touch nothing unless the loaded libgcastartup.so has exactly that
+// BuildId; 3 only reads messages.
 #include <android/log.h>
 #include <dlfcn.h>
 #include <elf.h>
 #include <fcntl.h>
 #include <link.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -28,7 +35,10 @@
 #include <unistd.h>
 
 #define TAG "GCam100x-native"
-#define LOG_PATH "/data/user/0/com.google.android.GoogleCamera/files/gcam100x.log"
+#define FILES_DIR "/data/user/0/com.google.android.GoogleCamera/files/"
+#define LOG_PATH FILES_DIR "gcam100x.log"
+#define MODEL_MARKER FILES_DIR "gcam100x_model_running"
+#define MODEL_MESSAGES FILES_DIR "gcam100x_model_messages"
 
 static const char kBuildId[] = "dcec58ae3422114fadc933c1c8a6331c";
 static const uintptr_t kOffFormatString = 0x78016d0; // std::string %s formatter
@@ -144,6 +154,91 @@ __attribute__((naked, used)) static void run_stub(void) {
         "br x16\n");
 }
 
+// --- 3. Google's own log messages ----------------------------------------------
+
+// liblog's common sink (Android 11+): every __android_log_print/_write/
+// _vprint/_buf_write call, Java's android.util.Log included, ends here.
+struct log_message {
+    size_t struct_size;
+    int32_t buffer_id;
+    int32_t priority;
+    const char *tag;
+    const char *file;
+    uint32_t line;
+    const char *message;
+};
+static void (*orig_write_log_message)(struct log_message *m);
+static atomic_int g_outside_lines; // warnings/errors outside the model window
+static atomic_int g_window_lines;  // lines inside the current model window
+static atomic_llong g_window_checked_ms;
+static atomic_int g_in_window;
+
+static long long now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* Is Google's model running right now? (marker file, re-checked every 40 ms) */
+static int in_model_window(void) {
+    long long t = now_ms();
+    if (t - atomic_load(&g_window_checked_ms) > 40) {
+        int in = access(MODEL_MARKER, F_OK) == 0;
+        if (in && !atomic_load(&g_in_window)) atomic_store(&g_window_lines, 0);
+        atomic_store(&g_in_window, in);
+        atomic_store(&g_window_checked_ms, t);
+    }
+    return atomic_load(&g_in_window);
+}
+
+static void append(const char *path, const char *line, int n) {
+    int fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600);
+    if (fd >= 0) {
+        write(fd, line, n);
+        close(fd);
+    }
+}
+
+static void capture(int prio, const char *tag, const char *msg) {
+    if (!msg || prio < ANDROID_LOG_INFO) return;
+    if (tag && strncmp(tag, "GCam100x", 8) == 0) return; // our own lines
+    int window = in_model_window();
+    if (window) {
+        if (atomic_fetch_add(&g_window_lines, 1) >= 400) return;
+    } else {
+        if (prio < ANDROID_LOG_WARN || atomic_fetch_add(&g_outside_lines, 1) >= 300) return;
+    }
+    static const char kPrio[] = "VVVDIWEF";
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm;
+    localtime_r(&ts.tv_sec, &tm);
+    char line[1200];
+    int n = snprintf(line, sizeof line, "%02d-%02d %02d:%02d:%02d.%03ld G [google%s] %c/%s: %.1000s\n", tm.tm_mon + 1,
+                     tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000, window ? " model" : "",
+                     kPrio[prio & 7], tag ? tag : "-", msg);
+    if (n <= 0) return;
+    if (n >= (int)sizeof line) n = sizeof line - 1;
+    append(LOG_PATH, line, n);
+    if (window) append(MODEL_MESSAGES, line, n);
+}
+
+static void hooked_write_log_message(struct log_message *m) {
+    if (m) capture(m->priority, m->tag, m->message);
+    orig_write_log_message(m);
+}
+
+static void install_log_capture(void) {
+    void *liblog = dlopen("liblog.so", RTLD_NOW | RTLD_NOLOAD);
+    void *sink = liblog ? dlsym(liblog, "__android_log_write_log_message") : NULL;
+    if (!sink) {
+        gc_log("Google log capture unavailable (no __android_log_write_log_message)");
+        return;
+    }
+    int r = g_hook(sink, (void *)hooked_write_log_message, (void **)&orig_write_log_message);
+    gc_log("Google log capture %s", r == 0 ? "installed (warnings/errors, everything during the model run)" : "FAILED");
+}
+
 // --- Locating libgcastartup.so --------------------------------------------------
 
 struct find_ctx {
@@ -202,6 +297,7 @@ static void on_library_loaded(const char *name, void *handle) {
 __attribute__((visibility("default"))) NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
     g_hook = entries ? entries->hook_func : NULL;
     __android_log_print(ANDROID_LOG_INFO, TAG, "native_init (API version %u)", entries ? entries->version : 0);
+    if (g_hook) install_log_capture();
     try_install(); // in case it is already loaded
     return on_library_loaded;
 }

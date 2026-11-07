@@ -230,9 +230,20 @@ class SliderHook(private val module: MainHook) {
                     module.logMessage(Log.INFO, TAG, "Shot: Google Pro Zoom (CENTAUR) capture, ${proShot?.zoom}x")
                     proShot?.googleAttempt = true
                     Guard.shotStarted("${proShot?.zoom}x at ${java.text.SimpleDateFormat("HH:mm:ss").format(java.util.Date())}")
+                    // The shot must carry the active Pro Zoom state (CENTAUR
+                    // fusion and Google's own crop both key off it).
+                    val curActive = cur != null && runCatching { tnm.getDeclaredField("b").getBoolean(cur) }.getOrDefault(false)
+                    if (!curActive && shotTnm != null) {
+                        val args = Array<Any?>(ctor.parameterTypes.size) { chain.getArg(it) }
+                        args[idx] = shotTnm
+                        val r = chain.proceed(args)
+                        afterGoogleShot(chain.thisObject, proShot)
+                        return@intercept r
+                    }
                 }
                 val r = chain.proceed()
-                proShot?.let { ProZoom.pclShots[chain.thisObject] = it }
+                if (active) afterGoogleShot(chain.thisObject, proShot)
+                else proShot?.let { ProZoom.pclShots[chain.thisObject] = it }
                 r
             }
             module.logMessage(Log.INFO, TAG, "Capture hook on pcl(tnm @ $idx)")
@@ -247,6 +258,25 @@ class SliderHook(private val module: MainHook) {
                 }
             }
         }.onFailure { module.logMessage(Log.WARN, TAG, "tna hook failed: $it") }
+    }
+
+    /**
+     * After a Google Pro Zoom shot's pcl is built: Google crops the shot itself
+     * when its Pro Zoom state is active and it is not high-res (pcl.k), the
+     * rule of Google's own sxh.r. Read from the finished pcl.
+     */
+    private fun afterGoogleShot(pcl: Any, shot: ProZoom.Shot?) {
+        if (shot == null) return
+        ProZoom.pclShots[pcl] = shot
+        runCatching {
+            val c = pcl.javaClass
+            val t = c.declaredFields.first { it.type.name == "tnm" }.apply { isAccessible = true }.get(pcl)
+            val b = t != null && t.javaClass.getDeclaredField("b").apply { isAccessible = true }.getBoolean(t)
+            val hiRes = c.getDeclaredField("k").apply { isAccessible = true }.getBoolean(pcl)
+            shot.googleCrops = b && !hiRes
+            module.logMessage(Log.INFO, TAG, "Shot #${shot.id}: Pro Zoom state active=$b, high-res=$hiRes -> " +
+                if (shot.googleCrops) "Google zooms the photo itself; this module leaves it untouched" else "this module crops the photo")
+        }.onFailure { module.logMessage(Log.WARN, TAG, "Shot #${shot.id}: cannot read Google's crop decision ($it); the photo is cropped by size") }
     }
 
     @Volatile private var lastLoggedActive = false

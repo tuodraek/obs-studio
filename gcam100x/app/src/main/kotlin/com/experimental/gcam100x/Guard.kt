@@ -17,6 +17,8 @@ import java.io.File
  */
 object Guard {
     private const val MAX_CRASHES = 2
+    /** Model runs in a row without an image before Google's path is switched off. */
+    private const val MAX_NO_OUTPUT = 2
     private val dir = File("/data/user/0/com.google.android.GoogleCamera/files")
     private val modelMarker = File(dir, "gcam100x_model_running")
     private val shotMarker = File(dir, "gcam100x_google_shot")
@@ -35,17 +37,19 @@ object Guard {
     @Volatile var crashesInShot = 0; private set
     @Volatile var consecutiveCrashes = 0; private set
     @Volatile var lastModelMs = -1L; private set
+    @Volatile var consecutiveNoOutput = 0; private set
 
     private fun readStats() = runCatching {
         statsFile.readText().split(',').map { it.trim().toLong() }.let {
             modelOk = it[0].toInt(); modelNoImage = it[1].toInt(); crashesInModel = it[2].toInt()
             crashesInShot = it[3].toInt(); consecutiveCrashes = it[4].toInt(); lastModelMs = it[5]
+            consecutiveNoOutput = it.getOrNull(6)?.toInt() ?: 0
         }
     }
 
     private fun writeStats() = runCatching {
         dir.mkdirs()
-        statsFile.writeText("$modelOk,$modelNoImage,$crashesInModel,$crashesInShot,$consecutiveCrashes,$lastModelMs")
+        statsFile.writeText("$modelOk,$modelNoImage,$crashesInModel,$crashesInShot,$consecutiveCrashes,$lastModelMs,$consecutiveNoOutput")
     }
 
     /** At process start, before any hook decides anything. */
@@ -60,7 +64,7 @@ object Guard {
                 if (disabledFile.exists() || consecutiveCrashes > 0)
                     log("Guard: model package changed ($prev -> ${ManifestHook.VARIANT}); Google's Pro Zoom path re-armed")
                 disabledFile.delete(); modelMarker.delete(); shotMarker.delete()
-                consecutiveCrashes = 0
+                consecutiveCrashes = 0; consecutiveNoOutput = 0
                 dir.mkdirs(); vf.writeText(ManifestHook.VARIANT)
                 writeStats()
             }
@@ -119,22 +123,55 @@ object Guard {
     fun shotStarted(desc: String) { if (googleEnabled) runCatching { dir.mkdirs(); shotMarker.writeText(desc) } }
     fun shotDone() { runCatching { shotMarker.delete() } }
 
+    private val modelMessages = File(dir, "gcam100x_model_messages")
+
+    /** Before a model run: the native part collects Google's messages of the run here. */
+    fun clearModelMessages() { runCatching { modelMessages.delete() } }
+
+    /**
+     * Google's own reason for a model run without output: its error lines
+     * (or lines that read like a failure) logged during the run.
+     */
+    fun modelReason(): String = runCatching {
+        val lines = modelMessages.readLines().mapNotNull { l ->
+            val m = Regex("""\[google model\] ([VDIWEF])/([^:]*): (.*)$""").find(l) ?: return@mapNotNull null
+            Triple(m.groupValues[1], m.groupValues[2].trim(), m.groupValues[3].trim())
+        }
+        val failure = Regex("(?i)fail|error|unable|not ready|not initialized|invalid|unsupported|mismatch|chip|abort|cannot|could not|denied|timeout|timed out")
+        val picked = lines.filter { it.first == "E" || it.first == "F" }.ifEmpty { lines.filter { failure.containsMatchIn(it.third) } }
+        picked.map { "${it.second}: ${it.third.take(180)}" }.distinct().takeLast(4).joinToString(" | ")
+    }.getOrDefault("")
+
     fun modelStarted(desc: String) { runCatching { dir.mkdirs(); modelMarker.writeText(desc) } }
 
-    fun modelReturned(gotImage: Boolean, ms: Long) {
+    /**
+     * After Google's model returned. [reason]: Google's own messages when it
+     * gave no image. After [MAX_NO_OUTPUT] runs in a row without an image the
+     * Google path is switched off from the next shot on: Google's Pro Zoom
+     * capture without its model is an unfinished burst merge, the normal HDR+
+     * photo + exact crop looks better. Settings can retry.
+     */
+    fun modelReturned(gotImage: Boolean, ms: Long, reason: String = "") {
         // The model run is the risky part; once it returned, a later exit is
         // not counted against Google's path.
         runCatching { modelMarker.delete(); shotMarker.delete() }
-        if (gotImage) modelOk++ else modelNoImage++
+        if (gotImage) { modelOk++; consecutiveNoOutput = 0 } else { modelNoImage++; consecutiveNoOutput++ }
         lastModelMs = ms
         consecutiveCrashes = 0
+        if (!gotImage && consecutiveNoOutput >= MAX_NO_OUTPUT && googleEnabled) {
+            val why = "Google's model gave no image $consecutiveNoOutput times in a row" +
+                if (reason.isNotEmpty()) " (Google: ${reason.take(300)})" else ""
+            runCatching { dir.mkdirs(); disabledFile.writeText(why) }
+            disabledReason = why
+            googleEnabled = false
+        }
         writeStats()
     }
 
     /** Turn Google's path back on (takes effect at the next camera start). */
     fun retry() {
         runCatching { disabledFile.delete(); modelMarker.delete(); shotMarker.delete() }
-        consecutiveCrashes = 0
+        consecutiveCrashes = 0; consecutiveNoOutput = 0
         writeStats()
         disabledReason = null
     }

@@ -59,7 +59,18 @@ object ProZoom {
         @Volatile var modelNoImage = false
         @Volatile var modelMs = -1L
         @Volatile var modelStatus = ""
-        /** Size of the first JPEG (Google's 30x original). */
+        /** Google's pipeline status: 1 = success (enhanced), 2 = Google's fallback. */
+        @Volatile var modelStatusCode = -1
+        /** Google's own error messages when its model gave no image. */
+        @Volatile var modelReason = ""
+        /**
+         * Google's pipeline crops this shot itself (active Pro Zoom state on the
+         * shot and not high-res: Google's own sxh.r rule). Its JPEGs and its
+         * capture thumbnail are then already at the zoom: never cropped again.
+         */
+        @Volatile var googleCrops = false
+        @Volatile var recorded = false
+        /** Size of the first JPEG of the shot. */
         @Volatile var originalSize: String? = null
         @Volatile var finalDone = false
         @Volatile var originalUri: Uri? = null
@@ -90,11 +101,18 @@ object ProZoom {
 
     /** One line per photo: what Google's pipeline did and what was saved. */
     private fun record(shot: Shot, saved: String) {
+        if (shot.recorded) return
+        shot.recorded = true
         val line = "${java.text.SimpleDateFormat("MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date(shot.time))} " +
             "#${shot.id} ${shot.zoom.toInt()}×: " +
             (if (!shot.googleAttempt) "normal capture" else
                 "Google Pro Zoom capture, processor ${if (shot.processorCalled) "called" else "NOT called"}, model " +
-                    when { shot.modelDelivered -> "OUTPUT (${shot.modelMs} ms)"; shot.modelNoImage -> "no output (${shot.modelMs} ms, ${shot.modelStatus})"; shot.modelMs >= 0 -> "returned (${shot.modelStatus})"; else -> "not run yet" }) +
+                    when {
+                        shot.modelDelivered -> "ENHANCED the photo (${shot.modelMs} ms)"
+                        shot.modelMs >= 0 -> "gave no output (${shot.modelMs} ms, ${shot.modelStatus}${if (shot.modelReason.isNotEmpty()) "; Google: ${shot.modelReason}" else ""})"
+                        shot.modelNoImage -> "did not run"
+                        else -> "not run yet"
+                    }) +
             " → saved $saved"
         log("Shot summary: $line")
         runCatching {
@@ -142,6 +160,9 @@ object ProZoom {
 
     private fun cropThumb(bmp: Bitmap?, shot: Shot?, what: String): Bitmap? {
         if (bmp == null || shot == null || bmp.isRecycled || ours.containsKey(bmp)) return null
+        // After Google's pipeline delivered its result, its thumbnails are of
+        // the (already zoomed) result: never crop them again.
+        if (shot.googleAttempt && (shot.resultTime > 0 || shot.modelDelivered)) return null
         return crop(bmp, shot.scale).also { log("ProZoom: $what thumbnail ${bmp.width}x${bmp.height} -> ${it.width}x${it.height}") }
     }
 
@@ -179,7 +200,10 @@ object ProZoom {
             val rrg = loader.loadClass("rrg")
             val c = rrg.declaredMethods.first { it.name == "c" && it.parameterTypes.size == 3 && it.parameterTypes[1] == Bitmap::class.java }
             module.hookMethod(c).intercept { chain ->
-                val shot = last?.takeIf { System.currentTimeMillis() - it.time < 15_000 }
+                // Google-cropped shots: what reaches the cache is either our
+                // cropped intermediate thumbnail or Google's own cropped capture
+                // thumbnail (sxh.r): nothing to crop.
+                val shot = last?.takeIf { System.currentTimeMillis() - it.time < 15_000 && !it.googleCrops }
                 val out = cropThumb(chain.getArg(1) as? Bitmap, shot, "cached")
                 if (out == null) chain.proceed() else chain.proceed(arrayOf(chain.getArg(0), out, chain.getArg(2)))
             }
@@ -205,7 +229,17 @@ object ProZoom {
                     // the 30x original, saved before the model runs: crop it now so
                     // the gallery shows the zoomed photo immediately.
                     shot.originalUri = uri
-                    if (shot.googleAttempt) awaitingFinal.add(shot) else Guard.shotDone()
+                    // (A Google shot whose processor already reported "no output"
+                    // gets no final photo: Google keeps this one.)
+                    val promoted = shot.resultTime > 0 && !shot.modelDelivered
+                    if (shot.googleAttempt && !promoted) awaitingFinal.add(shot) else Guard.shotDone()
+                    if (shot.googleCrops) {
+                        // Google zoomed this photo itself: its bytes go to the
+                        // gallery exactly as Google writes them.
+                        lastResult = "${shot.zoom.toInt()}× · Google's own Pro Zoom photo (model running)"
+                        log("ProZoom: shot #${shot.id}: Google's Pro Zoom original, already zoomed by Google; written untouched ($uri)")
+                        return@intercept out
+                    }
                     log("ProZoom: shot #${shot.id}: ${if (shot.googleAttempt) "Google's original (saved before the model runs)" else "photo"} -> exact crop ($uri)")
                     return@intercept ProZoomStream(out, cr, uri, shot, Kind.ORIGINAL)
                 }
@@ -222,6 +256,13 @@ object ProZoom {
                 awaitingFinal.remove(fin)
                 fin.finalDone = true
                 Guard.shotDone()
+                if (fin.googleCrops) {
+                    val enhanced = fin.modelDelivered
+                    lastResult = "${fin.zoom.toInt()}× · ${if (enhanced) "ENHANCED by Google's Pro Zoom model" else "Google's own Pro Zoom photo"} · model ${fin.modelMs} ms"
+                    log("ProZoom: shot #${fin.id}: Google's final photo (${if (enhanced) "model output" else "not from the model"}) written untouched ($uri)")
+                    record(fin, if (enhanced) "Google's ENHANCED photo, untouched" else "Google's own Pro Zoom photo, untouched")
+                    return@intercept out
+                }
                 log("ProZoom: shot #${fin.id}: final photo from Google's pipeline (model output: ${fin.modelDelivered}) ($uri)")
                 ProZoomStream(out, cr, uri, fin, if (fin.modelDelivered) Kind.MODEL_OUTPUT else Kind.ORIGINAL)
             }
@@ -274,6 +315,7 @@ object ProZoom {
                     val shot = inProcessor ?: last
                     val tag = "shot #${shot?.id} ${shot?.zoom}x"
                     log("Pro Zoom model: START native model run ($tag) on ${cls.name}; ${Forensics.memory(appContext)}")
+                    Guard.clearModelMessages()
                     Guard.modelStarted("$tag at ${java.text.SimpleDateFormat("HH:mm:ss").format(java.util.Date())}")
                     val t0 = System.currentTimeMillis()
                     val r = try { chain.proceed() } catch (t: Throwable) {
@@ -287,13 +329,22 @@ object ProZoom {
                     val c = runCatching { zC.getFloat(r) }.getOrDefault(Float.NaN)
                     val d = runCatching { zD.getInt(r) }.getOrDefault(-1)
                     val e = runCatching { zE.getInt(r) }.getOrDefault(-1)
-                    val got = handle != 0L
-                    Guard.modelReturned(got, ms)
+                    // Google's JNI (nativeRunZoomPlusPipeline) sets status = 2 exactly
+                    // when the pipeline returned image handle -1 (no image), else 1;
+                    // tmx then treats only status 1 as success. The handle is a key
+                    // into Google's image allocator, so -1 never maps to an image.
+                    val got = status == 1 && handle != -1L
+                    val reason = if (got) "" else Guard.modelReason()
+                    Guard.modelReturned(got, ms, reason)
                     if (got) shot?.modelDelivered = true
+                    shot?.modelStatusCode = status
                     shot?.modelMs = ms
+                    shot?.modelReason = reason
                     shot?.modelStatus = "status=$status image=${if (got) "yes" else "no"} score=$c d=$d e=$e"
-                    log("Pro Zoom model: END after $ms ms ($tag): status=$status, output image=${if (got) "YES (handle $handle)" else "NO"}, " +
+                    log("Pro Zoom model: END after $ms ms ($tag): status=$status, output image=${if (got) "YES (handle $handle)" else "NO (handle $handle)"}, " +
                         "value=$c, d=$d, e=$e; ${Forensics.memory(appContext)}")
+                    if (!got) log("Pro Zoom model: Google's own messages during the run: ${reason.ifEmpty { "none captured" }}")
+                    if (!Guard.googleEnabled) warn("Pro Zoom model: Google's path switched off from the next shot (${Guard.disabledReason}); normal HDR+ capture + exact crop. Settings → Retry Google Pro Zoom to try again")
                     r
                 }
                 log("Pro Zoom model: hooked Google's native model call ${cls.name}.c")
@@ -328,7 +379,20 @@ object ProZoom {
                         if (sh?.modelDelivered != true) sh?.modelNoImage = true
                         sh?.resultTime = System.currentTimeMillis()
                         Guard.shotDone()
-                        log("Pro Zoom result: NO model output; Google promotes the original (shot #${sh?.id})"); chain.proceed()
+                        log("Pro Zoom result: NO model output; Google promotes the original (shot #${sh?.id})")
+                        val r = chain.proceed()
+                        if (sh != null) {
+                            // Google keeps the photo it already saved: no final follows.
+                            awaitingFinal.remove(sh)
+                            if (sh.googleCrops) {
+                                // Its own Pro Zoom result, zoomed by Google, not by this module.
+                                lastResult = "${sh.zoom.toInt()}× · Google's own Pro Zoom photo (its model gave no output)"
+                                record(sh, "Google's own Pro Zoom photo, untouched")
+                            } else if (sh.originalSize != null) {
+                                record(sh, "exact crop of Google's original $lastSize")
+                            }
+                        }
+                        r
                     }
                     m.name == "g" && p.size == 4 -> module.hookMethod(m).intercept { chain ->
                         val sh = inProcessor ?: last
@@ -431,10 +495,10 @@ object ProZoom {
         val full = shot.originalSize
         if (!first && d != full) {
             val enhanced = shot.modelDelivered
-            lastResult = "${shot.zoom.toInt()}× · ${if (enhanced) "ENHANCED by Google's Pro Zoom model" else "Google's Pro Zoom result"} · $d · model ${shot.modelMs} ms"
+            lastResult = "${shot.zoom.toInt()}× · ${if (enhanced) "ENHANCED by Google's Pro Zoom model" else "Google's own Pro Zoom photo"} · $d · model ${shot.modelMs} ms"
             log("ProZoom: shot #${shot.id}: final photo $d (full frame $full) is already zoomed; saved untouched " +
                 "(${if (enhanced) "Google's model output" else "Google's result"}, ${jpeg.size / 1024} KB, model ${shot.modelMs} ms, ${shot.modelStatus})")
-            record(shot, "${if (enhanced) "ENHANCED by Google's Pro Zoom model" else "Google's Pro Zoom result, untouched"} $d")
+            record(shot, "${if (enhanced) "Google's ENHANCED photo" else "Google's own Pro Zoom photo"} $d, untouched")
             return jpeg
         }
         // A full 30x frame: crop it to the zoom.
