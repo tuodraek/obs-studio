@@ -1,0 +1,12 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+*.jks
+*.keystore
+.DS_Store
+
+# obs-studio ignores *.xml; Android projects need these
+!*.xml
+
