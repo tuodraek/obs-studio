@@ -44,7 +44,7 @@ object ProZoom {
      * model processes a shot, its output is kept untouched, otherwise the
      * photo is the exact centre crop.
      */
-    const val GOOGLE_PRO_ZOOM = true
+    val GOOGLE_PRO_ZOOM get() = Guard.googleEnabled
 
     class Shot(val scale: Float, val zoom: Float, val time: Long) {
         @Volatile var consumed = false
@@ -154,6 +154,7 @@ object ProZoom {
                 val mime = runCatching { vnk.javaClass.getDeclaredField("e").apply { isAccessible = true }.get(vnk) as String }.getOrNull()
                 if (mime != "image/jpeg") return@intercept out
                 val shot = claimShot() ?: return@intercept out
+                Guard.shotSaved()
                 if (shot.googleRan) {
                     log("ProZoom: ${shot.zoom}x photo from Google's Pro Zoom model, saved untouched")
                     lastResult = "${shot.zoom.toInt()}× · Google Pro Zoom model"

@@ -96,6 +96,7 @@ class SettingsHook(private val module: MainHook) {
             appendLine("  Framing: centre crop, the same as the viewfinder (Google Camera's own Pro Zoom crop)")
             appendLine("  Preview stabilization above 30×: off (no drift)")
             appendLine("  Processing: Google's Pro Zoom model when it runs; otherwise the exact crop")
+            appendLine("  Google's Pro Zoom path: ${if (Guard.googleEnabled) "on" else "off — ${Guard.lastCrash ?: "disabled"}"}")
             appendLine("  Last photo: ${ProZoom.lastResult ?: "none yet"}")
             appendLine()
             appendLine("Log: ${log ?: "not available"}")
@@ -126,12 +127,16 @@ class SettingsHook(private val module: MainHook) {
             addView(tv)
             setPadding(pad / 2, pad / 2, pad / 2, 0)
         }
-        AlertDialog.Builder(ctx)
+        val b = AlertDialog.Builder(ctx)
             .setTitle("GCam100x")
             .setView(ScrollView(ctx).apply { addView(column) })
             .setPositiveButton("Close", null)
             .setNeutralButton("Copy log") { _, _ -> copyLog(ctx, text) }
-            .show()
+        if (!Guard.googleEnabled) b.setNegativeButton("Retry Google Pro Zoom") { _, _ ->
+            Guard.retry()
+            Toast.makeText(ctx, "Google Pro Zoom re-enabled: close and reopen the camera", Toast.LENGTH_LONG).show()
+        }
+        b.show()
     }
 
     private fun copyLog(ctx: Context, header: String) {

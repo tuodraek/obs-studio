@@ -226,7 +226,10 @@ class SliderHook(private val module: MainHook) {
                         return@intercept r
                     }
                 }
-                if (active) module.logMessage(Log.INFO, TAG, "Shot: Google Pro Zoom (CENTAUR) capture, ${proShot?.zoom}x")
+                if (active) {
+                    module.logMessage(Log.INFO, TAG, "Shot: Google Pro Zoom (CENTAUR) capture, ${proShot?.zoom}x")
+                    Guard.shotStarted("${proShot?.zoom}x at ${java.text.SimpleDateFormat("HH:mm:ss").format(java.util.Date())}")
+                }
                 val r = chain.proceed()
                 proShot?.let { ProZoom.pclShots[chain.thisObject] = it }
                 r

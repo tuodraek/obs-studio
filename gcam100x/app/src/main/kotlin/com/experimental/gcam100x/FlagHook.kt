@@ -43,6 +43,9 @@ class FlagHook(private val module: MainHook) {
             "camera.enable_boba_jelly_lobster",
         )
 
+        /** Only forced while Google's Pro Zoom path is on (see Guard). */
+        val GOOGLE_PATH_FLAGS = setOf("camera.enable_boba_jelly_lobster")
+
         /** Numeric flags to override (value type and Optional wrapping are preserved). */
         val FORCE_NUMBER = mapOf(
             "camera.manual_max_tele_zoom" to 100.0,
@@ -165,7 +168,7 @@ class FlagHook(private val module: MainHook) {
                 val original = chain.proceed()
                 when {
                     name == null -> original
-                    name in FORCE_TRUE -> {
+                    name in FORCE_TRUE && (name !in GOOGLE_PATH_FLAGS || Guard.googleEnabled) -> {
                         logOnce(name, "Flag $name: original=$original -> forced true")
                         true
                     }

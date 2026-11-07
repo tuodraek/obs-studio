@@ -21,6 +21,7 @@ class MainHook : XposedModule() {
         // install exactly once even if several packages load into it.
         if (!installed.compareAndSet(false, true)) return
         logMessage(Log.INFO, TAG, "GCam100x ${BuildConfig.VERSION_NAME} starting in ${param.packageName}")
+        Guard.load { logMessage(Log.INFO, TAG, it) }
         ManifestHook(this).install(param)
         ProZoom.init(this)
         ProZoom.install(param.defaultClassLoader)
@@ -48,7 +49,9 @@ class MainHook : XposedModule() {
             if (logFile != null) return
             try {
                 f.parentFile?.mkdirs()
-                f.writeText(pending.joinToString(""))
+                // Keep the previous session (the one before a crash), drop older ones.
+                val prev = if (f.exists()) f.readText().let { t -> t.substring(maxOf(0, t.length - 300_000)) } else ""
+                f.writeText(prev + "\n===== new camera session =====\n" + pending.joinToString(""))
                 pending.clear()
                 logFile = f
             } catch (t: Throwable) {
