@@ -211,7 +211,7 @@ class SliderHook(private val module: MainHook) {
                 // applied to the finished photo in the save pipeline instead.
                 val shotTnm = live ?: cur
                 val active = shotTnm != null && runCatching { tnm.getDeclaredField("b").getBoolean(shotTnm) }.getOrDefault(false)
-                if (active) {
+                if (active && !ProZoom.GOOGLE_PRO_ZOOM) {
                     val z = tnm.getDeclaredField("c").getFloat(shotTnm)
                     val plain = runCatching {
                         building.set(true)
@@ -226,6 +226,7 @@ class SliderHook(private val module: MainHook) {
                         return@intercept r
                     }
                 }
+                if (active) module.logMessage(Log.INFO, TAG, "Shot: Google Pro Zoom (CENTAUR) capture, ${proShot?.zoom}x")
                 val r = chain.proceed()
                 proShot?.let { ProZoom.pclShots[chain.thisObject] = it }
                 r
@@ -238,7 +239,7 @@ class SliderHook(private val module: MainHook) {
             val tna = loader.loadClass("tna")
             for (m in tna.declaredMethods) {
                 if (m.name == "j" && m.parameterTypes.size == 1 && m.returnType == Void.TYPE) {
-                    module.hookMethod(m).intercept { null }
+                    module.hookMethod(m).intercept { chain -> if (ProZoom.GOOGLE_PRO_ZOOM) chain.proceed() else null }
                 }
             }
         }.onFailure { module.logMessage(Log.WARN, TAG, "tna hook failed: $it") }

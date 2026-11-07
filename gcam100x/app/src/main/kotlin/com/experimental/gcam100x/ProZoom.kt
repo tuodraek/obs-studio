@@ -43,8 +43,19 @@ object ProZoom {
     /** Share of the network's luminance detail applied on the clean base. */
     private const val DETAIL = 0.85f
 
+    /**
+     * Send Pro Zoom shots through Google Camera's own Pro Zoom pipeline
+     * (CENTAUR capture + Google's model via tna). Its controller loads the
+     * downloaded centaur_p26 model on this G4 (tna.i initialized=true); if the
+     * model processes a shot, its output is kept untouched, otherwise the
+     * photo falls back to the centre crop + upscaler.
+     */
+    const val GOOGLE_PRO_ZOOM = true
+
     class Shot(val scale: Float, val zoom: Float, val time: Long) {
         @Volatile var consumed = false
+        /** Google's Pro Zoom processor received both inputs for this shot. */
+        @Volatile var googleRan = false
     }
 
     private lateinit var module: MainHook
@@ -107,8 +118,18 @@ object ProZoom {
             val rah = loader.loadClass("rah")
             val pclF = rah.declaredFields.first { it.type.name == "pcl" }.apply { isAccessible = true }
             fun shotOf(o: Any?) = runCatching { pclF.get(o) }.getOrNull()?.let { pclShots[it] }
+            val pclCls = loader.loadClass("pcl")
+            val nF = pclCls.declaredFields.first { it.type.name == "tnm" }.apply { isAccessible = true }
+            val kF = pclCls.getDeclaredField("k").apply { isAccessible = true }
+            val tbF = loader.loadClass("tnm").getDeclaredField("b").apply { isAccessible = true }
+            // Google Camera crops rah.aj itself when the shot has an active Pro
+            // Zoom state and is not high-res (sxh.r): do not crop twice.
+            fun nativeCrop(o: Any?) = runCatching {
+                val pcl = pclF.get(o); tbF.getBoolean(nF.get(pcl)) && !kF.getBoolean(pcl)
+            }.getOrDefault(false)
             val aj = rah.declaredMethods.first { it.name == "aj" && it.parameterTypes.size == 2 && it.parameterTypes[0] == Bitmap::class.java }
             module.hookMethod(aj).intercept { chain ->
+                if (nativeCrop(chain.thisObject)) return@intercept chain.proceed()
                 val out = cropThumb(chain.getArg(0) as? Bitmap, shotOf(chain.thisObject), "capture")
                 if (out == null) chain.proceed() else chain.proceed(arrayOf(out, chain.getArg(1)))
             }
@@ -144,10 +165,57 @@ object ProZoom {
                 val mime = runCatching { vnk.javaClass.getDeclaredField("e").apply { isAccessible = true }.get(vnk) as String }.getOrNull()
                 if (mime != "image/jpeg") return@intercept out
                 val shot = claimShot() ?: return@intercept out
+                if (shot.googleRan) {
+                    log("ProZoom: ${shot.zoom}x photo from Google's Pro Zoom model, saved untouched")
+                    lastResult = "${shot.zoom.toInt()}× · Google Pro Zoom model"
+                    return@intercept out
+                }
                 ProZoomStream(out, aF.get(chain.thisObject) as android.content.ContentResolver, cF.get(chain.thisObject) as Uri, shot)
             }
             log("ProZoom: photo hook on vnn.g")
         }.onFailure { warn("ProZoom: photo hook failed: $it") }
+
+        // 3. Google's Pro Zoom pipeline: trace the fusion inputs (myn) and the
+        //    processor call (tna.c), mark shots the model processed.
+        if (GOOGLE_PRO_ZOOM) runCatching {
+            val myn = loader.loadClass("myn")
+            val seen = Collections.synchronizedMap(WeakHashMap<Any, String>())
+            fun note(o: Any?, what: String) {
+                val prev = seen[o] ?: ""
+                if (!prev.contains(what)) { seen[o] = "$prev $what"; log("Pro Zoom fusion: $what") }
+            }
+            for (m in myn.declaredMethods) {
+                val name = m.name
+                val kind = when {
+                    name in setOf("b", "c") && m.parameterTypes.size >= 4 -> "primary in (${m.parameterTypes[0].simpleName})"
+                    name in setOf("d", "e", "f") && m.parameterTypes.size >= 3 -> "secondary in (${m.parameterTypes[0].simpleName})"
+                    name == "close" && m.parameterTypes.isEmpty() -> "close"
+                    else -> null
+                } ?: continue
+                module.hookMethod(m).intercept { chain ->
+                    val arg0 = if (m.parameterTypes.isNotEmpty()) chain.getArg(0) else Unit
+                    note(chain.thisObject, if (arg0 == null) "$kind = null" else kind)
+                    chain.proceed()
+                }
+            }
+            val tna = loader.loadClass("tna")
+            val iF = tna.getDeclaredField("i").apply { isAccessible = true }
+            val mys = loader.loadClass("mys")
+            val rawF = mys.getDeclaredField("a").apply { isAccessible = true }
+            val c = tna.declaredMethods.first { it.name == "c" && it.parameterTypes.size == 7 }
+            module.hookMethod(c).intercept { chain ->
+                val init = runCatching { iF.getBoolean(chain.thisObject) }.getOrDefault(false)
+                // mys.a: (desugared) Optional<RawReadView>
+                val raw = runCatching { rawF.get(chain.getArg(3))?.let { it.javaClass.getMethod("isPresent").invoke(it) as Boolean } }.getOrNull()
+                log("Pro Zoom fusion: Google processor tna.c called (model initialized=$init, secondary RAW present=$raw)")
+                if (init && raw == true) last?.googleRan = true
+                val t0 = System.currentTimeMillis()
+                val r = chain.proceed()
+                log("Pro Zoom fusion: tna.c returned in ${System.currentTimeMillis() - t0} ms (processing continues async)")
+                r
+            }
+            log("ProZoom: Google Pro Zoom pipeline tracing installed")
+        }.onFailure { warn("ProZoom: Google pipeline hooks failed: $it") }
     }
 
     /** Buffers Google Camera's JPEG; on close writes the Pro Zoom photo instead. */
