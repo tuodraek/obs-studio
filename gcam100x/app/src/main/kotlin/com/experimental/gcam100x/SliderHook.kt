@@ -178,6 +178,9 @@ class SliderHook(private val module: MainHook) {
     }
 
     @Volatile private var lastActiveTnm: Any? = null
+    /** pcl constructor argument that becomes pcl.k (high-res 50 MP capture). */
+    private val HI_RES_ARG = 10
+
     /** Set while this module builds its own tnm (not a viewfinder state change). */
     private val building = ThreadLocal.withInitial { false }
     @Volatile private var lastZoom = 0f
@@ -201,6 +204,7 @@ class SliderHook(private val module: MainHook) {
                 val cur = chain.getArg(idx)
                 module.logMessage(Log.INFO, TAG, "Shot created: Pro Zoom state on shot = $cur (live active = $live)")
                 // Queue the beyond-30x crop for the saved photo.
+                var proShot: ProZoom.Shot? = null
                 (live ?: cur)?.let { t ->
                     runCatching {
                         val b = tnm.getDeclaredField("b").getBoolean(t)
@@ -209,7 +213,7 @@ class SliderHook(private val module: MainHook) {
                         val shot = if (b) ProZoom.onShot(sc, z)
                             else if (lastZoom > 30f && System.currentTimeMillis() - lastZoomTime < 5000) ProZoom.onShot(30f / lastZoom, lastZoom)
                             else null
-                        if (shot != null) ProZoom.pclShots[chain.thisObject] = shot
+                        proShot = shot
                     }
                 }
                 // Keep the still on Google Camera's normal 30x HDR+ / Night Sight
@@ -228,11 +232,22 @@ class SliderHook(private val module: MainHook) {
                     if (plain != null) {
                         val args = Array<Any?>(ctor.parameterTypes.size) { chain.getArg(it) }
                         args[idx] = plain
-                        module.logMessage(Log.INFO, TAG, "Shot: normal HDR+ capture at 30x; Pro Zoom ${z}x applied on save")
-                        return@intercept chain.proceed(args)
+                        // No 50 MP high-res capture for Pro Zoom shots (Google
+                        // Camera's own Pro Zoom excludes it too): 12.5 MP HDR+
+                        // is seconds faster, and past 30x the crop has no
+                        // extra real detail at 50 MP.
+                        val hiRes = HI_RES_ARG.takeIf { it < args.size && ctor.parameterTypes[it] == java.lang.Boolean.TYPE }
+                        val wasHiRes = hiRes?.let { args[it] == true } ?: false
+                        if (hiRes != null) args[hiRes] = false
+                        module.logMessage(Log.INFO, TAG, "Shot: normal HDR+ capture at 30x (high-res ${if (wasHiRes) "on -> off" else "off"}); Pro Zoom ${z}x applied on save")
+                        val r = chain.proceed(args)
+                        proShot?.let { ProZoom.pclShots[chain.thisObject] = it }
+                        return@intercept r
                     }
                 }
-                chain.proceed()
+                val r = chain.proceed()
+                proShot?.let { ProZoom.pclShots[chain.thisObject] = it }
+                r
             }
             module.logMessage(Log.INFO, TAG, "Capture hook on pcl(tnm @ $idx)")
         }.onFailure { module.logMessage(Log.WARN, TAG, "pcl hook failed: $it") }

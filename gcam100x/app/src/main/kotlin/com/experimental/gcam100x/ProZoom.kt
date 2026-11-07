@@ -87,49 +87,51 @@ object ProZoom {
     }
 
     @Volatile var activity: java.lang.ref.WeakReference<android.app.Activity>? = null
-    private val main by lazy { Handler(android.os.Looper.getMainLooper()) }
 
-    private fun findPreview(v: android.view.View, best: Array<android.view.View?>) {
-        if (v.visibility != android.view.View.VISIBLE || v.width <= 0 || v.height <= 0) return
-        if (v is android.view.SurfaceView || v is android.view.TextureView) {
-            val b = best[0]
-            if (b == null || v.width.toLong() * v.height > b.width.toLong() * b.height) best[0] = v
-        }
-        if (v is android.view.ViewGroup) for (i in 0 until v.childCount) findPreview(v.getChildAt(i), best)
-    }
+    /** Shot waiting for the next rendered Pro Zoom viewfinder frame. */
+    @Volatile private var grabFor: Shot? = null
+
+    private fun grabViewfinder(shot: Shot) { grabFor = shot }
 
     /**
-     * Copies the on-screen viewfinder (Google Camera's Pro Zoom cropped
-     * preview, exactly what the user sees) at the shutter: the reference for
-     * 1:1 framing and for checking thumbnails.
+     * Google Camera's Pro Zoom viewfinder renderer (tni.a(in, out)) draws the
+     * centre crop of the 30x preview into [out]. The first frame after the
+     * shutter is copied: exactly what the user saw, the reference for 1:1
+     * framing.
      */
-    private fun grabViewfinder(shot: Shot) {
-        val act = activity?.get() ?: run { log("ProZoom: viewfinder grab: no activity"); return }
-        main.post {
-            runCatching {
-                val holder = arrayOfNulls<android.view.View>(1)
-                findPreview(act.window.decorView, holder)
-                val v = holder[0] ?: run { log("ProZoom: viewfinder grab: no preview surface"); return@post }
-                val w = maxOf(8, v.width / 3); val h = maxOf(8, v.height / 3)
-                val t0 = System.currentTimeMillis()
-                fun done(bmp: Bitmap) {
-                    val view = Align.View(Align.gray(bmp, 384), System.currentTimeMillis())
-                    bmp.recycle()
-                    if (shot.view == null) shot.view = view
-                    lastView = view
-                    log("ProZoom: viewfinder grabbed from ${v.javaClass.simpleName} ${v.width}x${v.height} in ${System.currentTimeMillis() - t0} ms")
+    private fun hookViewfinderRenderer(loader: ClassLoader) {
+        runCatching {
+            val tni = loader.loadClass("tni")
+            val vlm = loader.loadClass("vlm")
+            val a = tni.declaredMethods.first { it.name == "a" && it.parameterTypes.size == 2 && it.parameterTypes.all { p -> p == vlm } }
+            val hb = vlm.getMethod("h")
+            module.hookMethod(a).intercept { chain ->
+                val r = chain.proceed()
+                val shot = grabFor
+                if (shot != null) {
+                    grabFor = null
+                    runCatching {
+                        val t0 = System.nanoTime()
+                        android.opengl.GLES20.glFinish()
+                        val buf = hb.invoke(chain.getArg(1)) as android.hardware.HardwareBuffer
+                        val hw = Bitmap.wrapHardwareBuffer(buf, android.graphics.ColorSpace.get(android.graphics.ColorSpace.Named.SRGB))
+                            ?: error("format ${buf.format} not readable")
+                        val sw = hw.copy(Bitmap.Config.ARGB_8888, false)
+                        hw.recycle()
+                        val ms = (System.nanoTime() - t0) / 1_000_000
+                        worker.post {
+                            val v = Align.View(Align.gray(sw, 384), System.currentTimeMillis())
+                            if (shot.view == null) shot.view = v
+                            lastView = v
+                            log("ProZoom: viewfinder frame ${sw.width}x${sw.height} copied from the Pro Zoom renderer ($ms ms on GL)")
+                            sw.recycle()
+                        }
+                    }.onFailure { log("ProZoom: viewfinder copy failed: $it") }
                 }
-                if (v is android.view.TextureView) {
-                    v.getBitmap(w, h)?.let { done(it) }
-                } else {
-                    val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-                    android.view.PixelCopy.request(v as android.view.SurfaceView, bmp, { r ->
-                        if (r == android.view.PixelCopy.SUCCESS) worker.post { done(bmp) }
-                        else log("ProZoom: viewfinder grab failed (PixelCopy $r)")
-                    }, main)
-                }
-            }.onFailure { log("ProZoom: viewfinder grab failed: $it") }
-        }
+                r
+            }
+            log("ProZoom: viewfinder renderer hook on tni.a()")
+        }.onFailure { module.logMessage(Log.WARN, TAG, "ProZoom: tni hook failed: $it") }
     }
 
     @Volatile private var last: Shot? = null
@@ -170,6 +172,7 @@ object ProZoom {
             }
             log("ProZoom: save-pipeline hook on vnn.g()")
             hookThumbnailView(loader)
+            hookViewfinderRenderer(loader)
         }.onFailure { module.logMessage(Log.WARN, TAG, "ProZoom: vnn hook failed: $it") }
         // The shot thumbnail at its source: rah.ak (intermediate thumbnail,
         // shown first) and rah.aj (capture-indicator thumbnail). Google Camera
@@ -461,21 +464,37 @@ object ProZoom {
         val region = dec.decodeRegion(rect, null)
         dec.recycle()
         val cw = region.width; val ch = region.height
+        var outSize = "${cw}x$ch"
         // 2. Detail: the network runs at the crop's real detail scale (1/4),
         //    output at the crop's native resolution, luminance only.
         var mode = "AI ${sr.backend}"
         val full: Bitmap = try {
-            val f = maxOf(SR_IN_DIV.toFloat(), maxOf(cw, ch) / SR_IN_MAX.toFloat())
-            val small = downscale(region, maxOf(64, (cw / f).toInt()), maxOf(64, (ch / f).toInt()))
-            val up = sr.upscale4x(small)
+            // 3:4 / 4:3 crops: one whole-frame pass, 384x512 -> 1536x2048
+            // (~0.4 s on the GPU). Other aspect ratios: tiles.
+            val portrait3x4 = kotlin.math.abs(cw * 4f / (ch * 3f) - 1f) < 0.03f
+            val landscape4x3 = kotlin.math.abs(cw * 3f / (ch * 4f) - 1f) < 0.03f
+            val small: Bitmap
+            val up: Bitmap
+            if (portrait3x4 || landscape4x3) {
+                small = downscale(region, if (portrait3x4) 384 else 512, if (portrait3x4) 512 else 384)
+                up = sr.upscaleWhole(small) ?: sr.upscale4x(small)
+            } else {
+                val f = maxOf(SR_IN_DIV.toFloat(), maxOf(cw, ch) / SR_IN_MAX.toFloat())
+                small = downscale(region, maxOf(64, (cw / f).toInt()), maxOf(64, (ch / f).toInt()))
+                up = sr.upscale4x(small)
+            }
+            // Output: the network's size (1536x2048 for 3:4), or the crop's if smaller.
+            val outW = if (portrait3x4 || landscape4x3) up.width else cw
+            val outH = if (portrait3x4 || landscape4x3) up.height else ch
             mode = "AI ${sr.backend}"
-            val upN = if (up.width == cw && up.height == ch) up else Bitmap.createScaledBitmap(up, cw, ch, true).also { up.recycle() }
+            val upN = if (up.width == outW && up.height == outH) up else Bitmap.createScaledBitmap(up, outW, outH, true).also { up.recycle() }
             // Base = the crop averaged down to its real detail scale and back
             // up: Google Camera's sharpening halos and pixel noise (magnified
             // 4x at 120x) are averaged out, colour stays the photo's own.
-            val clean = Bitmap.createScaledBitmap(small, cw, ch, true)
+            val clean = Bitmap.createScaledBitmap(small, outW, outH, true)
             if (small !== region) small.recycle()
             region.recycle()
+            outSize = "${outW}x$outH"
             lumaBlend(clean, upN, DETAIL).also { upN.recycle(); clean.recycle() }
         } catch (t: Throwable) {
             module.logMessage(Log.WARN, TAG, "ProZoom: upscaler failed ($t); exact crop")
@@ -488,7 +507,7 @@ object ProZoom {
         full.recycle()
         val outBytes = copyExif(jpeg, enc.toByteArray(), shot.zoom)
         val ms = System.currentTimeMillis() - t0
-        lastResult = "${shot.zoom.toInt()}× · ${cw}×$ch from ${w}×$h · $ms ms ($mode) · framing: $how"
+        lastResult = "${shot.zoom.toInt()}× · $outSize from crop ${cw}×$ch of ${w}×$h · $ms ms ($mode) · framing: $how"
         log("ProZoom: ${w}x$h at ${shot.zoom}x -> ${cw}x$ch at (${rect.left},${rect.top}) in $ms ms " +
             "[frame ${t1 - t0} ms, detail ${t2 - t1} ms, encode ${System.currentTimeMillis() - t2} ms] ($mode); framing: $how")
         return outBytes

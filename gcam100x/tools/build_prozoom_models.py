@@ -36,7 +36,7 @@ def perm():
                 p[(i * 4 + j) * 3 + c] = c * 16 + i * 4 + j
     return p
 
-def build(W, residual_only=False):
+def build(W, residual_only=False, H=None, Wd=None):
     layers = []; idx = 0
     while f"body.{idx}.weight" in W:
         w = W[f"body.{idx}.weight"]
@@ -49,7 +49,9 @@ def build(W, residual_only=False):
             layers.append(("p", tf.constant(w.reshape(1, 1, 1, -1).astype(np.float32)), None))
         idx += 1
 
-    @tf.function(input_signature=[tf.TensorSpec([1, T, T, 3], tf.float32)])
+    H = H or T; Wd = Wd or T
+
+    @tf.function(input_signature=[tf.TensorSpec([1, H, Wd, 3], tf.float32)])
     def f(x):
         h = x
         for t, a, b in layers:
@@ -58,12 +60,12 @@ def build(W, residual_only=False):
         # The int8 (TPU) model outputs only the detail residual: quantizing
         # "input + residual" leaves too few levels for the detail (4x4 blocks).
         # The app adds the nearest-upsampled input back in float.
-        return r if residual_only else r + tf.image.resize(x, (T * 4, T * 4), method="nearest")
+        return r if residual_only else r + tf.image.resize(x, (H * 4, Wd * 4), method="nearest")
     return f
 
 if __name__ == "__main__":
     A = load_pth(sys.argv[1]); B = load_pth(sys.argv[2])
-    s = float(sys.argv[3]) if len(sys.argv) > 3 else 0.5
+    s = float(sys.argv[3]) if len(sys.argv) > 3 and not sys.argv[3].startswith("--") else 0.5
     Wm = {k: s * A[k] + (1 - s) * B[k] for k in A}
     conc = build(Wm).get_concrete_function()
     conc_res = build(Wm, residual_only=True).get_concrete_function()
@@ -78,7 +80,14 @@ if __name__ == "__main__":
             yield [im[y:y + T, x:x + T, :3][None]]
 
     open("prozoom_x4_f32.tflite", "wb").write(tf.lite.TFLiteConverter.from_concrete_functions([conc]).convert())
-    print("float model written", flush=True)
+    # Whole-frame models for the Pro Zoom output (one pass, no tiles):
+    # 384x512 input -> 1536x2048, portrait and landscape.
+    for h, w, name in ((512, 384, "portrait"), (384, 512, "landscape")):
+        c = build(Wm, H=h, Wd=w).get_concrete_function()
+        open(f"prozoom_x4_{name}.tflite", "wb").write(tf.lite.TFLiteConverter.from_concrete_functions([c]).convert())
+    print("float models written", flush=True)
+    if "--float-only" in sys.argv:
+        sys.exit(0)
     q = tf.lite.TFLiteConverter.from_concrete_functions([conc_res])
     q.optimizations = [tf.lite.Optimize.DEFAULT]
     q.representative_dataset = rep

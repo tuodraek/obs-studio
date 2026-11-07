@@ -28,7 +28,7 @@ class SuperRes(private val module: MainHook) {
         private const val OUT = TILE * SCALE
     }
 
-    private class Backend(val name: String, val interp: Interpreter, val int8: Boolean, val closeable: AutoCloseable?) {
+    internal class Backend(val name: String, val interp: Interpreter, val int8: Boolean, val closeable: AutoCloseable?) {
         // uint8 <-> 0..1 mapping of the quantized model's input and output.
         val inScale = if (int8) interp.getInputTensor(0).quantizationParams().scale else 1f
         val inZero = if (int8) interp.getInputTensor(0).quantizationParams().zeroPoint else 0
@@ -102,8 +102,83 @@ class SuperRes(private val module: MainHook) {
 
     private fun close(b: Backend) { runCatching { b.interp.close(); b.closeable?.close() } }
 
-    /** Loads the model and picks the backend ahead of the first photo. */
-    fun warmUp() { ensure() }
+    /** Loads the models and compiles them on the GPU ahead of the first photo. */
+    fun warmUp() {
+        ensure()
+        for (n in arrayOf("portrait", "landscape")) runCatching { whole(n) }
+            .onFailure { module.logMessage(Log.WARN, TAG, "SuperRes: whole-frame $n model unavailable: $it") }
+    }
+
+    // --- Whole-frame models: 384x512 / 512x384 in one pass (no tiles) ---------
+
+    private class Whole(val interp: Interpreter, val delegate: AutoCloseable?, val w: Int, val h: Int) {
+        val inBuf: ByteBuffer = ByteBuffer.allocateDirect(w * h * 3 * 4).order(ByteOrder.nativeOrder())
+        val outBuf: ByteBuffer = ByteBuffer.allocateDirect(w * h * 16 * 3 * 4).order(ByteOrder.nativeOrder())
+        @Volatile var name = ""
+    }
+    private val wholes = HashMap<String, Whole>()
+
+    @Synchronized
+    private fun whole(kind: String): Whole {
+        wholes[kind]?.let { return it }
+        val tile = ensure()
+        val model = loadModel("prozoom_x4_$kind.tflite")
+        val (w, h) = if (kind == "portrait") 384 to 512 else 512 to 384
+        val wh = if (tile.name == "GPU") {
+            val d = GpuDelegate(GpuDelegate.Options().setPrecisionLossAllowed(true)
+                .setInferencePreference(GpuDelegate.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED))
+            Whole(Interpreter(model, Interpreter.Options().addDelegate(d)), d, w, h).also { it.name = "GPU" }
+        } else {
+            Whole(Interpreter(model, Interpreter.Options().setNumThreads(4).setUseXNNPACK(true)), null, w, h).also { it.name = "CPU" }
+        }
+        val t = System.currentTimeMillis()
+        wh.inBuf.rewind(); wh.outBuf.rewind(); wh.interp.run(wh.inBuf, wh.outBuf) // compile
+        val t1 = System.currentTimeMillis()
+        wh.inBuf.rewind(); wh.outBuf.rewind(); wh.interp.run(wh.inBuf, wh.outBuf)
+        module.logMessage(Log.INFO, TAG, "SuperRes: whole-frame $kind ${w}x$h on ${wh.name}: compile ${t1 - t} ms, run ${System.currentTimeMillis() - t1} ms")
+        wholes[kind] = wh
+        return wh
+    }
+
+    /** x4 of a 384x512 or 512x384 bitmap in one pass; null for other sizes. */
+    fun upscaleWhole(src: Bitmap): Bitmap? {
+        val kind = when {
+            src.width == 384 && src.height == 512 -> "portrait"
+            src.width == 512 && src.height == 384 -> "landscape"
+            else -> return null
+        }
+        val wh = whole(kind)
+        synchronized(wh) {
+            val t0 = System.currentTimeMillis()
+            val w = wh.w; val h = wh.h
+            val px = IntArray(w * h)
+            src.getPixels(px, 0, w, 0, 0, w, h)
+            wh.inBuf.rewind()
+            val fin = wh.inBuf.asFloatBuffer()
+            for (c in px) {
+                fin.put(((c shr 16) and 0xff) / 255f); fin.put(((c shr 8) and 0xff) / 255f); fin.put((c and 0xff) / 255f)
+            }
+            wh.outBuf.rewind()
+            wh.interp.run(wh.inBuf, wh.outBuf)
+            val t1 = System.currentTimeMillis()
+            val ow = w * SCALE; val oh = h * SCALE
+            val out = Bitmap.createBitmap(ow, oh, Bitmap.Config.ARGB_8888)
+            wh.outBuf.rewind()
+            val fb = wh.outBuf.asFloatBuffer()
+            val row = IntArray(ow)
+            for (y in 0 until oh) {
+                for (x in 0 until ow) {
+                    val r = (fb.get() * 255f + 0.5f).toInt().coerceIn(0, 255)
+                    val g = (fb.get() * 255f + 0.5f).toInt().coerceIn(0, 255)
+                    val b = (fb.get() * 255f + 0.5f).toInt().coerceIn(0, 255)
+                    row[x] = (0xff shl 24) or (r shl 16) or (g shl 8) or b
+                }
+                out.setPixels(row, 0, ow, 0, y, ow, 1)
+            }
+            module.logMessage(Log.INFO, TAG, "SuperRes: whole-frame ${w}x$h -> ${ow}x$oh, model ${t1 - t0} ms, total ${System.currentTimeMillis() - t0} ms (${wh.name})")
+            return out
+        }
+    }
 
     /** Returns a bitmap 4x the size of [src]. */
     fun upscale4x(src: Bitmap): Bitmap {
