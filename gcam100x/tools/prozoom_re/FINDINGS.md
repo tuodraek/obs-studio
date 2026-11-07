@@ -59,3 +59,18 @@ Hardware reports identify Santafe as the Tensor G6 TPU; Google Camera's own conf
 - int8 weights; 918 MB is the scale of the SD 2.x UNet (about 865M parameters).
 
 The VAE is a separate small "student" VAE: `c32`, latent 128×128×8, fp16.
+
+## centaur_p25 (Pixel 10, Tensor G5), the package GCam100x 4.0.0 uses
+Obtained from Google Play with a Pixel 10 Pro (`blazer`) device profile: `split_mdd_zoomplus_manifest_assets_module_p25.apk`, delivered to that device group only (the p26 split is delivered to `grizzly_only` and `kodiak_only`). Its manifest lists model set **11422**; all 9 files are SHA-1 verified.
+
+| File | Size | Stage | Executables |
+|---|---|---|---|
+| fc68b16d… | 939 MB | denoiser (same tensors as p26) | family **25**, `buenos_b0` |
+| 3721f30e… | 22 MB | VAE encoder | family 25, `buenos_b0` |
+| a4f62875… | 46 MB | VAE decoder | family 25, `buenos_b0` |
+| 31d53482… | 10 MB | segmentation 640×640 | family 25 |
+| df87d79c… | 2 MB | aux net, 256×384×2 → **128×192×1** | family 25 |
+| 07847f86…, 2be69bf8…, dee800d5… | — | detector, text embedding, numeric config: identical to p26 | — |
+| 5f923d6a… | 682 B | gldm pipeline config | — |
+
+Chip families: 25 = `buenos` (Tensor G5), 26 = `santafe` (Tensor G6). The G4's executables are `rio_a0`.

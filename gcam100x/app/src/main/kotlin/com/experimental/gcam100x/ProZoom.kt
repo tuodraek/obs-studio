@@ -40,7 +40,7 @@ object ProZoom {
     /**
      * Send Pro Zoom shots through Google Camera's own Pro Zoom pipeline
      * (CENTAUR capture + Google's model via tna). Its controller loads the
-     * downloaded centaur_p26 model on this G4 (tna.i initialized=true); if the
+     * downloaded centaur model on this G4 (tna.i initialized=true); if the
      * model processes a shot, its output is kept untouched, otherwise the
      * photo is the exact centre crop.
      */

@@ -51,6 +51,20 @@ object Guard {
     /** At process start, before any hook decides anything. */
     fun load(log: (String) -> Unit) {
         readStats()
+        // Crash history belongs to one model package: start fresh when the
+        // package changes (e.g. Pixel 11 -> Pixel 10 model).
+        runCatching {
+            val vf = File(dir, "gcam100x_model_variant")
+            val prev = if (vf.exists()) vf.readText().trim() else ""
+            if (prev != ManifestHook.VARIANT) {
+                if (disabledFile.exists() || consecutiveCrashes > 0)
+                    log("Guard: model package changed ($prev -> ${ManifestHook.VARIANT}); Google's Pro Zoom path re-armed")
+                disabledFile.delete(); modelMarker.delete(); shotMarker.delete()
+                consecutiveCrashes = 0
+                dir.mkdirs(); vf.writeText(ManifestHook.VARIANT)
+                writeStats()
+            }
+        }
         runCatching {
             val inModel = modelMarker.takeIf { it.exists() }?.readText()
             val inShot = shotMarker.takeIf { it.exists() }?.readText()

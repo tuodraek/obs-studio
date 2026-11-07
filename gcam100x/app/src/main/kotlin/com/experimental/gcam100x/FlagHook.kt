@@ -71,8 +71,10 @@ class FlagHook(private val module: MainHook) {
     fun install(param: XposedModuleInterface.PackageLoadedParam) {
         // Prefer a manifest bundled in the installed APK; otherwise use the
         // Pixel 10 one that ManifestHook serves.
-        val (asset, variant) = findCentaurManifest(param)
-            ?: (ManifestHook.ASSET to ManifestHook.VARIANT)
+        // Always the Pixel 10 (Tensor G5) package that ManifestHook serves; the
+        // installed bundle's own manifest (Pixel 11, Tensor G6) is only logged.
+        findCentaurManifest(param)
+        val (asset, variant) = ManifestHook.ASSET to ManifestHook.VARIANT
         forceString["camera.centaur_manifest_config_file_name"] = "asset:/$asset"
         forceString["camera.centaur_variant"] = variant
         try {
