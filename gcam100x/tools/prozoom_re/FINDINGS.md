@@ -260,3 +260,34 @@ hooks.
 Format note: `DGC0` is not the public Coral `DWN1` executable schema
 (`executable.fbs`), so container and instruction fields cannot be read
 with that schema.
+
+## tombstone_13 — the 23:12:55 Pro Zoom crash (5.3.0), fully decoded
+
+- Frame #00 resolves to lib-relative `(0x55d3000 - 0x4000) + 0xff8 = 0x55cfff8`
+  (the page was remapped by the hook framework, so the unwinder printed a bare
+  apk offset instead of the SO name). `0x55cfff8` is `ldr x8,[x8,#0x38]` in
+  `ModelRunner::Run`.
+- Frame #01 `0x55ae04c` is `super_resolution_diffuser.cc` Inference; the call
+  there (`0x55ae04c`) is `blr x9`, a virtual call through **slot 0** of the
+  ModelRunner object `x20`.
+- Registers / "memory near x0" at the fault: `x0`=the ModelRunner,
+  `[x0+0]`=vtable (valid), **`[x0+0x10]` (config_) = 0**. So `ldr x8,[x0,#0x10]`
+  loaded 0 and `ldr x8,[x8,#0x38]` faulted at `0x38`. `Cause: null pointer
+  dereference`, same fault as tombstone_11 (21:55).
+- Meaning: the diffuser's ModelRunner exists but its **config_ is null** — the
+  runner was never initialized with a config. `Run` crashes while formatting
+  its own error line `ModelRunner::Run:%s` (reads `config_->name_`).
+- Why 5.3.0's guard didn't prevent it: the fix wrote `config_` only if
+  `writable(&config_)` returned true (it reads `/proc/self/maps`); that check
+  evidently failed, so the write was skipped. The fix must not depend on a
+  self-map parse.
+
+### The real blocker is upstream of the crash
+`config_` being null is a **symptom**: `InitInferenceRunners` (`0x55cf3bc`)
+did not give this runner a config. That function logs its outcome as
+`InitInferenceRunners: %s` (and the init path can emit "Missing valid/enabled
+inference engine", "Missing model name", etc.). Init runs during pipeline
+setup, *before* Inference, so its status line is emitted (and flushed to the
+kernel log) before the crash. A full logcat taken across a fresh Pro Zoom shot
+therefore already contains the reason the runner has no config — no new build
+is required to obtain it.
