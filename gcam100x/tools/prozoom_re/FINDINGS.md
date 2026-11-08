@@ -223,3 +223,36 @@ and logs every call, to show which runner the pipeline reaches.
 The 5.2.0 startup failure in the exit records is "ANR: failed to complete
 startup", with the main thread blocked on a mutex. That was a deadlock at
 startup, not a crash.
+
+## Static validation of the ModelRunner hooks (5.3.1-diag, not released)
+
+Checked against libgcastartup.so (BuildId dcec58ae…):
+- Interface: in all four functions (`0x55cffc4`, `0x55d03a8`, `0x55d078c`,
+  `0x55d0b70`), the only registers read before being written, up to the first
+  call, are x0 (this), x1–x3 (arguments), x8 (result pointer) and the
+  callee-saved x19–x28 (saved by the prologue). No floating-point or vector
+  argument registers are used. A stub that preserves x0–x8 and x30 and calls
+  an AAPCS-compliant C function matches this interface.
+- Patched bytes: the first four instructions of each (`sub sp`, three `stp`)
+  are not PC-relative, so relocating them into the trampoline is plain.
+  Decoding every branch in `.text` (B/BL, B.cond, CBZ/CBNZ, TBZ/TBNZ) finds
+  none that targets bytes 4–15 of these functions.
+- Callers: no direct calls. They are four consecutive slots (13–16) of one
+  vtable at `0x79b3c90`, so they are only reached by virtual calls.
+- Handler side effects: liblog and appends to the module's own log file. It
+  calls nothing that reaches a ModelRunner. `/proc/self/maps` is read only on
+  the null-config path.
+- Not verifiable here: the hook framework's trampoline at run time, and
+  whether the 5.3.0 `Run` hook itself was involved in the 23:12:55 crash.
+  Only the crash report (tombstone) for that crash can show the faulting
+  frame.
+
+Google Camera's own native pipeline messages (tag `native`, e.g.
+`inference_runner_impl.cc`, `darwinn_adapter.cc`) and the TPU driver's
+messages (tag `Darwinn`) already go to logcat. A complete capture taken from
+before the shot shows how far Google's pipeline gets, without new camera
+hooks.
+
+Format note: `DGC0` is not the public Coral `DWN1` executable schema
+(`executable.fbs`), so container and instruction fields cannot be read
+with that schema.
