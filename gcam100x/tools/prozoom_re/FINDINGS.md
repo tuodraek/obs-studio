@@ -291,3 +291,39 @@ setup, *before* Inference, so its status line is emitted (and flushed to the
 kernel log) before the crash. A full logcat taken across a fresh Pro Zoom shot
 therefore already contains the reason the runner has no config — no new build
 is required to obtain it.
+
+## Full crash inventory (CameraCrash archive, 11-05 → 11-08)
+
+Every Google Camera crash recorded is the SAME diffuser site, across many
+sessions and module versions:
+`#01 super_resolution_diffuser Inference (0x55ae04c)` → virtual slot 0 →
+`ModelRunner::Run (0x55cffc4)`, crashing at `0x55cfff8` (`ldr x8,[x8,#0x38]`,
+reading `config_->name_`). The formatter variant (`0x78016dc`, fault 0x0) is
+the same failure one step later (non-null-but-bad config, bad std::string).
+
+Fault addresses show `config_` is not merely null but **uninitialized**:
+- 0x38  -> config_ = 0            (null)
+- 0x3070 -> config_ = 0x3038      (garbage)
+- 0x02046fe802047020 -> config_ = 0x02046fe802046fe8 (garbage; looks like
+  two identical 32-bit halves, i.e. uninitialized struct/vector memory)
+
+So the diffuser's ModelRunner is constructed but `Initialize()` never stores a
+config, and the pipeline calls `Run()` on it regardless. This is consistent and
+reproducible on the G4; it is the single blocker to the model running.
+
+### What the offline capture cannot provide
+Google's pipeline logs (`InitInferenceRunners: %s`, `ModelRunner::Initialize`,
+darwinn RegisterGraph / DIVE / version errors) are INFO-level `native`-tag
+lines. This ROM keeps neither them in the 2-day ring buffer (rotated out in
+minutes) nor embeds them in tombstones or DropBox native-crash records (checked
+all 13 GoogleCamera entries: none carry pipeline log lines). The only way to
+capture the status that explains the uninitialized config is a LIVE logcat
+(`logcat -f ... *:V`) running across a fresh Pro Zoom shot — no new build
+needed, since init is logged before the crash.
+
+Vendor-side candidates already narrowed (libedgetpu_util.so): chip-family check
+PASSES buenos_b0 ("assuming compatibility"); single `cluster2` PASSES. Still
+possible: graph-container-version ceiling, firmware VII mismatch, or DIVE heap
+("DIVE heap size is not set. Is the model compiled for the right target?") —
+the denoiser is a DIVE model (`dive_model_info`, `dive_scratch_147419136`).
+The live log names which one.
