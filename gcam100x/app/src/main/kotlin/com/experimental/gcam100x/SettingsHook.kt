@@ -96,9 +96,15 @@ class SettingsHook(private val module: MainHook) {
             appendLine("  Model download: ${ProZoom.modelState ?: "not checked yet"}")
             appendLine("  Framing: centre crop, the same as the viewfinder (Google Camera's own Pro Zoom crop)")
             appendLine("  Preview stabilization above 30×: off (no drift)")
-            appendLine("  Processing: ${if (Guard.googleEnabled) "Google's Pro Zoom pipeline (CENTAUR); its photo is kept exactly as Google makes it, ENHANCED when its model delivers"
+            appendLine("  Processing: ${if (ProZoom.GOOGLE_PRO_ZOOM) "Google's Pro Zoom pipeline (CENTAUR); its photo is kept exactly as Google makes it, ENHANCED when its model delivers"
                 else "normal HDR+ photo + exact crop at native resolution"}")
-            appendLine("  Google's Pro Zoom path: ${if (Guard.googleEnabled) "on" else "off — ${Guard.disabledReason ?: "disabled"}"}")
+            appendLine("  Native crash guard: ${Native.describe()}")
+            appendLine("  Google's Pro Zoom path: ${when {
+                !Guard.googleEnabled && Guard.disabledReason == null -> "re-enabled; takes effect when the camera is reopened"
+                !Guard.googleEnabled -> "off — ${Guard.disabledReason}"
+                !Native.guardActive() -> "on, but NOT used: the native crash guard is not active"
+                else -> "on"
+            }}")
             appendLine("  Google model: ${Guard.summary()}")
             Guard.crashedLastTime?.let { appendLine("  Previous camera session ended $it") }
             Forensics.lastExit?.let { appendLine("  Last camera exit: $it") }

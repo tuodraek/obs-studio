@@ -44,7 +44,7 @@ object ProZoom {
      * model processes a shot, its output is kept untouched, otherwise the
      * photo is the exact centre crop.
      */
-    val GOOGLE_PRO_ZOOM get() = Guard.googleEnabled
+    val GOOGLE_PRO_ZOOM get() = Guard.googleEnabled && Native.guardActive()
 
     class Shot(val scale: Float, val zoom: Float, val time: Long) {
         val id = ++counter
@@ -271,7 +271,7 @@ object ProZoom {
 
         // 3. Google's Pro Zoom pipeline: trace the fusion inputs (myn) and the
         //    processor call (tna.c), mark shots the model processed.
-        if (GOOGLE_PRO_ZOOM) runCatching {
+        if (Guard.googleEnabled) runCatching {
             val myn = loader.loadClass("myn")
             val seen = Collections.synchronizedMap(WeakHashMap<Any, String>())
             fun note(o: Any?, what: String) {

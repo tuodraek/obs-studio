@@ -12,6 +12,9 @@ class MainHook : XposedModule() {
 
     override fun onModuleLoaded(param: XposedModuleInterface.ModuleLoadedParam) {
         logMessage(Log.INFO, TAG, "Module loaded in process ${param.processName}")
+        // As early as possible: the native crash guard must be in place before
+        // Google Camera loads libgcastartup.so.
+        Native.load(runCatching { moduleApplicationInfo.sourceDir }.getOrNull()) { pr, msg -> logMessage(pr, TAG, msg) }
     }
 
     override fun onPackageLoaded(param: XposedModuleInterface.PackageLoadedParam) {

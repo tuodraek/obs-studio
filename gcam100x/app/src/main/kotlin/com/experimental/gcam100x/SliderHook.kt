@@ -211,7 +211,10 @@ class SliderHook(private val module: MainHook) {
                 // applied to the finished photo in the save pipeline instead.
                 val shotTnm = live ?: cur
                 val active = shotTnm != null && runCatching { tnm.getDeclaredField("b").getBoolean(shotTnm) }.getOrDefault(false)
-                if (active && !ProZoom.GOOGLE_PRO_ZOOM) {
+                val google = ProZoom.GOOGLE_PRO_ZOOM
+                if (active && !google && Guard.googleEnabled)
+                    module.logMessage(Log.WARN, TAG, "Shot: Google's Pro Zoom model NOT used: native crash guard not active (${Native.describe()}); normal HDR+ capture + exact crop")
+                if (active && !google) {
                     val z = tnm.getDeclaredField("c").getFloat(shotTnm)
                     val plain = runCatching {
                         building.set(true)
@@ -254,7 +257,7 @@ class SliderHook(private val module: MainHook) {
             val tna = loader.loadClass("tna")
             for (m in tna.declaredMethods) {
                 if (m.name == "j" && m.parameterTypes.size == 1 && m.returnType == Void.TYPE) {
-                    module.hookMethod(m).intercept { chain -> if (ProZoom.GOOGLE_PRO_ZOOM) chain.proceed() else null }
+                    module.hookMethod(m).intercept { chain -> if (Guard.googleEnabled) chain.proceed() else null }
                 }
             }
         }.onFailure { module.logMessage(Log.WARN, TAG, "tna hook failed: $it") }

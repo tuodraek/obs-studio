@@ -22,6 +22,7 @@
 // 1 and 2 touch nothing unless the loaded libgcastartup.so has exactly that
 // BuildId; 3 only reads messages.
 #include <android/log.h>
+#include <jni.h>
 #include <dlfcn.h>
 #include <elf.h>
 #include <fcntl.h>
@@ -55,7 +56,16 @@ typedef struct {
 
 static HookFunType g_hook;
 static uintptr_t g_base;
-static int g_installed;
+static atomic_int g_installed;
+
+// State reported to the Java side (Native.status()).
+#define ST_API 1          // native_init called with the hook API
+#define ST_GUARD 2        // formatter guard + ModelRunner::Run observer installed
+#define ST_LOG 4          // Google log capture installed
+#define ST_WRONG_BUILD 8  // libgcastartup.so has another BuildId: nothing installed
+#define ST_HOOK_FAILED 16 // a guard hook could not be installed
+#define ST_LIB_SEEN 32    // libgcastartup.so is loaded
+static atomic_int g_state;
 
 static void gc_log(const char *fmt, ...) {
     char msg[900];
@@ -236,6 +246,7 @@ static void install_log_capture(void) {
         return;
     }
     int r = g_hook(sink, (void *)hooked_write_log_message, (void **)&orig_write_log_message);
+    if (r == 0) atomic_fetch_or(&g_state, ST_LOG);
     gc_log("Google log capture %s", r == 0 ? "installed (warnings/errors, everything during the model run)" : "FAILED");
 }
 
@@ -272,19 +283,23 @@ static int find_cb(struct dl_phdr_info *info, size_t size, void *data) {
 }
 
 static void try_install(void) {
-    if (g_installed || !g_hook) return;
+    if (atomic_load(&g_installed) || !g_hook) return;
     struct find_ctx ctx;
     memset(&ctx, 0, sizeof ctx);
     dl_iterate_phdr(find_cb, &ctx);
     if (!ctx.base) return;
-    g_installed = 1;
+    int expected = 0;
+    if (!atomic_compare_exchange_strong(&g_installed, &expected, 1)) return; // installed by another thread
+    atomic_fetch_or(&g_state, ST_LIB_SEEN);
     if (strcmp(ctx.build_id, kBuildId) != 0) {
+        atomic_fetch_or(&g_state, ST_WRONG_BUILD);
         gc_log("libgcastartup.so BuildId %s is not the supported %s; native guards NOT installed", ctx.build_id, kBuildId);
         return;
     }
     g_base = ctx.base;
     int r1 = g_hook((void *)(g_base + kOffFormatString), (void *)hooked_format, (void **)&orig_format);
     int r2 = g_hook((void *)(g_base + kOffModelRunnerRun), (void *)run_stub, &orig_run);
+    atomic_fetch_or(&g_state, r1 == 0 && r2 == 0 ? ST_GUARD : ST_HOOK_FAILED);
     gc_log("libgcastartup.so (BuildId %s) at %p: formatter guard %s, ModelRunner::Run observer %s", ctx.build_id,
          (void *)g_base, r1 == 0 ? "installed" : "FAILED", r2 == 0 ? "installed" : "FAILED");
 }
@@ -296,8 +311,21 @@ static void on_library_loaded(const char *name, void *handle) {
 
 __attribute__((visibility("default"))) NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
     g_hook = entries ? entries->hook_func : NULL;
+    if (g_hook) atomic_fetch_or(&g_state, ST_API);
     __android_log_print(ANDROID_LOG_INFO, TAG, "native_init (API version %u)", entries ? entries->version : 0);
     if (g_hook) install_log_capture();
     try_install(); // in case it is already loaded
     return on_library_loaded;
+}
+
+// --- Java side ----------------------------------------------------------------
+
+// com.experimental.gcam100x.Native.status(): installs the guards if
+// libgcastartup.so is loaded by now (in case its load was not reported), then
+// returns the ST_* bits.
+JNIEXPORT jint JNICALL Java_com_experimental_gcam100x_Native_status(JNIEnv *env, jclass cls) {
+    (void)env;
+    (void)cls;
+    try_install();
+    return atomic_load(&g_state);
 }
