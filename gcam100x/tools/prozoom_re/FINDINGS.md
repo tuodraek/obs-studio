@@ -237,8 +237,12 @@ Checked against libgcastartup.so (BuildId dcec58ae…):
   are not PC-relative, so relocating them into the trampoline is plain.
   Decoding every branch in `.text` (B/BL, B.cond, CBZ/CBNZ, TBZ/TBNZ) finds
   none that targets bytes 4–15 of these functions.
-- Callers: no direct calls. They are four consecutive slots (13–16) of one
-  vtable at `0x79b3c90`, so they are only reached by virtual calls.
+- Callers: no direct branch to any of them. Their addresses are stored in
+  four consecutive 8-byte entries in `.data.rel.ro` (`0x79b3cf8`–`0x79b3d10`),
+  which fits a table of virtual functions. Which class's table that is is not
+  established: walking back from the entries to the table's start found a
+  type-info name for an unrelated `std::function` helper
+  (`DmabufAlignedAllocator`), so that walk stopped in the wrong place.
 - Handler side effects: liblog and appends to the module's own log file. It
   calls nothing that reaches a ModelRunner. `/proc/self/maps` is read only on
   the null-config path.
