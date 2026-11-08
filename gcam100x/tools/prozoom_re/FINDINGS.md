@@ -327,3 +327,57 @@ possible: graph-container-version ceiling, firmware VII mismatch, or DIVE heap
 ("DIVE heap size is not set. Is the model compiled for the right target?") —
 the denoiser is a DIVE model (`dive_model_info`, `dive_scratch_147419136`).
 The live log names which one.
+
+## ROOT CAUSE (live capture 11-08 17:40:32, path re-enabled) — TPU firmware rejects the G5 program
+
+Captured from the phone's own logs during a real Pro Zoom shot, in order:
+```
+tflite : Replacing 1 out of 1 node(s) with delegate (edgetpu-custom-op-2) node ... subgraph 0 (main)
+native : RegisterGraphRequest completed with error: Error code from firmware response. retval=0. error_code=3
+native : Graph registration request failed: INVALID_ARGUMENT: Error code from firmware response ... error_code=3
+native : tf_lite_error_reporter: Node number 1 (edgetpu-custom-op-2) failed to prepare.
+native : model_runner.cc:219 INTERNAL: Failed to allocate tensors.
+         (inference_engine_tf_lite_impl.cc:1230 ; diffusion/inference/tflite_inference_runner.cc:339)
+Darwinn: ERR registration.cc:128 - Expected chip type 16 in executable, got 255.
+Darwinn: ERR driver_impl.cc:104 - Registration setup failed.
+Darwinn: ERR registrations.cc:231 - Error in submitting TPU offload registration.
+```
+Firmware build on device: `zpr_tpu_20260603.0.0`.
+
+Full causal chain (now end to end):
+1. The denoiser's one op is the `edgetpu-custom-op-2` TPU delegate.
+2. Preparing it calls the vendor TPU driver's `RegisterGraph`.
+3. The **TPU firmware** rejects it: it requires **chip type 16** (the G4 "rio"
+   TPU) in the executable and reads **255** (0xFF = unrecognized) from the
+   G5-compiled (`buenos_b0`) program.
+4. Registration fails → `tflite` "failed to prepare" → `model_runner.cc:219
+   Failed to allocate tensors` → the ModelRunner is left with **config_ == null**.
+5. The pipeline later calls that runner's `Run()` → the null `config_`
+   dereference at `0x55cfff8` → the SIGSEGV in every tombstone.
+
+So the crash we chased is a *downstream symptom*; the real gate is a
+firmware-level chip-type check in the G4 TPU. This is not in the camera app, not
+in `libedgetpu_util.so` (its chip-NAME check "assumes compatibility"), and not
+bypassable from app or module code — it is enforced by the TPU's own firmware
+during graph registration.
+
+### Route viability (evidence-based)
+- **Run the G5 binary as-is on G4:** impossible. Firmware rejects registration
+  before any execution; nothing runs (not even the partial execution seen in the
+  Gemma G5->G4 report, which got past registration on its path).
+- **Recompile the denoiser for G4** (on-device DarwiNN compiler / Tensor SDK
+  plugin compiler): needs the *source* TFLite graph + weights. Google ships only
+  the AOT-compiled G5 program on the device, and Pro Res Zoom's model is not
+  published (unlike Gemma, which the litert-community G4 build recompiled from
+  open weights). No source => nothing to compile.
+- **Patch the executable's chip-type field 255->16:** the only thing not yet
+  tried. Long shot: (a) the field the firmware reads is in the proprietary DGC0
+  container, not yet located (needs a known rio executable to diff); (b) even if
+  registration were forced, the buenos instruction stream is a different TPU
+  generation's machine code — correct full inference is highly unlikely, and the
+  firmware reading 255 (unrecognized) rather than a rival chip number points to
+  format/ISA divergence, not a mere tag.
+
+The `19 00 00 00` after `buenos_b0`/`santafe_a0` in the DGC0 metadata is a
+string-length prefix (for `main_STAND_ALONE_cluster2`), NOT a chip id — the
+numeric chip family 25/26 lives only in the outer TFLite custom-options wrapper.
