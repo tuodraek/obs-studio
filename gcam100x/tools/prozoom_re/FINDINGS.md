@@ -136,3 +136,53 @@ no high-res (`!pcl.k`), Google's pipeline writes the photo already zoomed
 (4.1.0 device run: 1536x2040 = 6144x8160 x 0.25) and crops the capture
 thumbnail (`rah.aj` → `sxh.r`). The intermediate thumbnail (`rah.ak`, from
 `ofv`/`pha` via `pnw.p`) is not cropped by Google.
+
+## Audit (after 5.3.0): confirmed vs open
+
+Confirmed by analysis of the files on disk:
+- Model config (`5f923d6a…`, 682 bytes, decoded with `pbraw.py`): three
+  runners, `encoder`, `unet` (inputs sample / encoder_hidden_states /
+  timesteps) and `decoder`. Each uses a TFLite engine config (field 14) that
+  points at a `*-graph-custom_op.tflite` file and is enabled (`3: 1`).
+- Each of those files is a TFLite shell with a single `edgetpu-custom-op-2` op
+  holding one DarwiNN executable, chip `buenos_b0` (family 25). The denoiser's
+  parameters are in 35 groups (`main_STAND_ALONE_params_Group_0_*`), with
+  scratch 146,800,640 B and a DIVE part (`dive_model_info`,
+  `dive_scratch_147419136`).
+- Model I/O shapes are known (denoiser: [1,77,1024], [1,128,128,16], [] →
+  [1,128,128,8]). Internal layer shapes and the graph are not in readable
+  form.
+- Google Camera does not check the executable's chip itself before use:
+  - executable selection returns a single entry unchanged;
+  - it registers the executable with the vendor TPU library
+    (`libedgetpu_client.google.so`, `DarwinnApi2_VirtualDevice_RegisterGraph*`).
+  Any chip-based rejection would be in that vendor library (on the phone,
+  `/vendor/lib64`), not in the camera.
+- Checks inside libgcastartup on this path: ModelRunner init
+  (`CheckModelConfig`, `CheckEngineConfig(tflite_config)`, "Missing model
+  name", "Missing enabled inference engine", ...), the DIVE heap check in the
+  statically linked `darwinn/driver_shared/graph_utils`, and a chip-family
+  switch (`0x632bc58`) that accepts families 4, 5, 11, 14, 15, 16, 24, 25, 26
+  and 31.
+- Published precedent (litert-community/Gemma3-1B-IT-Tensor-NPU README): a
+  G3-compiled program runs on G4 (the runtime does not enforce the device
+  tag). A G5-compiled Gemma model loaded on G4 and its prefill ran, but its
+  decode did not. That went through the LiteRT dispatch path; it is not
+  verified for Google Camera's path.
+- Google's Tensor ML SDK compiler: the URL in LiteRT's own `setup.py`
+  (`…/tensor-ml-sdk/sdk/releases/6.1.0/litert_plugin_compiler.tar.gz`)
+  returns 404, so a G4-vs-G5 test compile could not be made here.
+
+Open (not yet established):
+- The exact error behind "Inference Runner is not ready" on the G4: does
+  graph registration in the vendor library fail, does the DIVE or scratch
+  setup fail, or does initialization fail for another reason?
+- Whether the vendor library on the G4 accepts a family-25 executable from
+  Google Camera's path, as the LiteRT precedent suggests.
+
+Needed next (data, no APK):
+- `/vendor/lib64/libedgetpu_client.google.so` and
+  `/vendor/lib64/libedgetpu_util.so` from the phone (world-readable), to
+  analyze the vendor-side graph registration checks.
+- One root logcat capture of a single Pro Zoom shot, to get Google's own
+  initialization error.
