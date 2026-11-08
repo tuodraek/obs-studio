@@ -9,7 +9,8 @@
 //    super-resolver (super_resolution_diffuser.cc, Inference), and the
 //    string formatter (0x78016d0) dereferences it: SIGSEGV, null pointer.
 //    Run crashed there before running anything.
-// This library hooks only ModelRunner::Run (a function that runs only inside
+// This library hooks only the four ModelRunner entry points (Run, RunPartial and
+// their overloads; they run only inside
 // a diffusion model call, never at camera start) with a register-preserving
 // stub: when the config or its name is null, a valid empty one is put in its
 // place, and Run returns its own "Inference Runner is not ready." error
@@ -34,7 +35,15 @@
 #define LOG_PATH FILES_DIR "gcam100x.log"
 
 static const char kBuildId[] = "dcec58ae3422114fadc933c1c8a6331c";
-static const uintptr_t kOffModelRunnerRun = 0x55cffc4; // ModelRunner::Run
+// ModelRunner entry points (identical prologues; each reads this->[0x10]->[0x38]
+// and formats it before checking that the runner is ready).
+static const uintptr_t kOffRunners[4] = {
+    0x55cffc4, // ModelRunner::Run
+    0x55d03a8, // ModelRunner::Run (overload)
+    0x55d078c, // ModelRunner::RunPartial
+    0x55d0b70, // ModelRunner::RunPartial (overload)
+};
+static const char *const kRunnerNames[4] = {"Run", "Run#2", "RunPartial", "RunPartial#2"};
 
 typedef int (*HookFunType)(void *func, void *replace, void **backup);
 typedef int (*UnhookFunType)(void *func);
@@ -81,7 +90,8 @@ static void gc_log(const char *fmt, ...) {
 
 // --- 2. ModelRunner::Run observer ---------------------------------------------
 
-static void *orig_run;   // backup trampoline
+static void *orig_run[4]; // backup trampolines
+static atomic_int g_calls;
 
 // An empty libc++ std::string (short form, size 0) and a zeroed stand-in
 // config whose name is that string.
@@ -110,8 +120,25 @@ static int writable(uintptr_t a, size_t len) {
 // null and Run would crash formatting it. Make it a valid empty name; Run then
 // reaches its own "Inference Runner is not ready." check and returns an
 // error, so Google's pipeline reports "no image" instead of crashing.
-__attribute__((used)) static void on_model_runner_run(uintptr_t self, uintptr_t caller) {
+__attribute__((used)) static void on_model_runner_run(uintptr_t self, uintptr_t caller, int which) {
     if (!self) return;
+    if (atomic_fetch_add(&g_calls, 1) < 80) {
+        uintptr_t c = *(uintptr_t *)(self + 0x10);
+        uintptr_t n = c ? *(uintptr_t *)(c + 0x38) & ~(uintptr_t)3 : 0;
+        char shown[64] = "(null)";
+        if (n) {
+            const uint8_t *str = (const uint8_t *)n;
+            const char *p;
+            size_t len;
+            if (str[0] & 1) { len = *(const size_t *)(str + 8); p = *(const char *const *)(str + 16); }
+            else { len = str[0] >> 1; p = (const char *)(str + 1); }
+            if (len > sizeof shown - 1) len = sizeof shown - 1;
+            memcpy(shown, p, len);
+            shown[len] = 0;
+        }
+        gc_log("ModelRunner::%s runner=%p config=%p name=%s (caller +0x%lx)", kRunnerNames[which & 3], (void *)self,
+               (void *)c, shown, (unsigned long)(caller - g_base));
+    }
     uintptr_t *cfgp = (uintptr_t *)(self + 0x10);
     uintptr_t cfg = *cfgp;
     if (!cfg) {
@@ -135,28 +162,36 @@ __attribute__((used)) static void on_model_runner_run(uintptr_t self, uintptr_t 
     }
 }
 
-// Register-preserving stub: x0-x8 and x30 are kept (x8 carries the result
-// pointer of ModelRunner::Run), then control continues in the original.
-__attribute__((naked, used)) static void run_stub(void) {
-    __asm__ volatile(
-        "stp x29, x30, [sp, #-96]!\n"
-        "stp x0, x1, [sp, #16]\n"
-        "stp x2, x3, [sp, #32]\n"
-        "stp x4, x5, [sp, #48]\n"
-        "stp x6, x7, [sp, #64]\n"
-        "str x8, [sp, #80]\n"
-        "mov x1, x30\n"
-        "bl on_model_runner_run\n"
-        "ldp x0, x1, [sp, #16]\n"
-        "ldp x2, x3, [sp, #32]\n"
-        "ldp x4, x5, [sp, #48]\n"
-        "ldp x6, x7, [sp, #64]\n"
-        "ldr x8, [sp, #80]\n"
-        "ldp x29, x30, [sp], #96\n"
-        "adrp x16, orig_run\n"
-        "ldr x16, [x16, :lo12:orig_run]\n"
-        "br x16\n");
-}
+// Register-preserving stubs: x0-x8 and x30 are kept (x8 carries the result
+// pointer), the handler gets (self, caller, which), then control continues in
+// the original function.
+#define RUN_STUB(N)                                                             \
+    __attribute__((naked, used)) static void run_stub##N(void) {               \
+        __asm__ volatile("stp x29, x30, [sp, #-96]!\n"                         \
+                         "stp x0, x1, [sp, #16]\n"                             \
+                         "stp x2, x3, [sp, #32]\n"                             \
+                         "stp x4, x5, [sp, #48]\n"                             \
+                         "stp x6, x7, [sp, #64]\n"                             \
+                         "str x8, [sp, #80]\n"                                 \
+                         "mov x1, x30\n"                                       \
+                         "mov w2, #" #N "\n"                                   \
+                         "bl on_model_runner_run\n"                            \
+                         "ldp x0, x1, [sp, #16]\n"                             \
+                         "ldp x2, x3, [sp, #32]\n"                             \
+                         "ldp x4, x5, [sp, #48]\n"                             \
+                         "ldp x6, x7, [sp, #64]\n"                             \
+                         "ldr x8, [sp, #80]\n"                                 \
+                         "ldp x29, x30, [sp], #96\n"                           \
+                         "adrp x16, orig_run\n"                                \
+                         "add x16, x16, :lo12:orig_run\n"                      \
+                         "ldr x16, [x16, #" #N "*8]\n"                         \
+                         "br x16\n");                                          \
+    }
+RUN_STUB(0)
+RUN_STUB(1)
+RUN_STUB(2)
+RUN_STUB(3)
+static void (*const kStubs[4])(void) = {run_stub0, run_stub1, run_stub2, run_stub3};
 
 // --- Locating libgcastartup.so --------------------------------------------------
 
@@ -205,10 +240,12 @@ static void try_install(void) {
         return;
     }
     g_base = ctx.base;
-    int r = g_hook((void *)(g_base + kOffModelRunnerRun), (void *)run_stub, &orig_run);
-    atomic_fetch_or(&g_state, r == 0 ? ST_GUARD : ST_HOOK_FAILED);
-    gc_log("libgcastartup.so (BuildId %s) at %p: ModelRunner::Run guard %s", ctx.build_id, (void *)g_base,
-           r == 0 ? "installed" : "FAILED");
+    int failed = 0;
+    for (int i = 0; i < 4; i++)
+        if (g_hook((void *)(g_base + kOffRunners[i]), (void *)kStubs[i], &orig_run[i]) != 0) failed++;
+    atomic_fetch_or(&g_state, failed == 0 ? ST_GUARD : ST_HOOK_FAILED);
+    gc_log("libgcastartup.so (BuildId %s) at %p: ModelRunner guards (Run, Run#2, RunPartial, RunPartial#2) %s",
+           ctx.build_id, (void *)g_base, failed == 0 ? "installed" : "FAILED");
 }
 
 static void on_library_loaded(const char *name, void *handle) {

@@ -186,3 +186,40 @@ Needed next (data, no APK):
   analyze the vendor-side graph registration checks.
 - One root logcat capture of a single Pro Zoom shot, to get Google's own
   initialization error.
+
+## Vendor TPU runtime on the Pixel 9 Pro XL (libedgetpu_util.so, "libedgetpu_util_rio.so")
+
+Analyzed from the phone's own `/vendor/lib64/libedgetpu_util.so` (BuildId
+a2b5f2ea…) and `libedgetpu_client.google.so` (c030f5f4…):
+- Chip compatibility (`0x702278`): it maps the program's chip name to a
+  family (`0x7b90c8` → `0x27de74`) and requires it to equal the platform's.
+  If the name is unknown, it logs "Failed to get chip family from model chip
+  name. Assuming compatibility." and accepts the program. This runtime
+  contains no `buenos` or `santafe` strings (only `rio`, `abrolhos`,
+  `janeiro`), so a `buenos_b0` program takes the "assuming compatibility"
+  path. **The chip check does not reject the G5 programs on the G4.** This
+  agrees with the published report of a G5 Gemma program loading on a G4.
+- Clusters: the runtime knows Rio cluster 2 ("WARNING: Running model on Rio
+  cluster 2 might reduce the TPU overall concurrency performance"). The
+  fatal check "Only one hardware cluster id is supported on this platform"
+  (`0x2785bc`) is for programs that name several clusters. Each Pro Zoom
+  file names one, `cluster2`.
+- Other load-time checks exist and are not yet evaluated against these files:
+  graph container version (`0x6dcca8`), firmware VII version, DIVE heap.
+- The phone also runs an on-device DarwiNN compiler in
+  `vendor.google.edgetpu_vendor_service` (`CompileTfliteFlatbuffer2`, "Darwinn
+  TFlite ODC"). It compiles TFLite graphs for this TPU. That needs a
+  compilable source graph.
+
+## 5.3.0 device run (23:12:54)
+
+The model started at 23:12:54.314 and the process died with SIGSEGV at
+23:12:55.872. The `ModelRunner::Run` guard was installed and logged nothing.
+So the crash was not a null-name `Run` call. Three more entry points
+(`Run` overload `0x55d03a8`, `RunPartial` `0x55d078c` and `0x55d0b70`) have
+the same prologue and read the same config name. 5.3.1-diag guards all four
+and logs every call, to show which runner the pipeline reaches.
+
+The 5.2.0 startup failure in the exit records is "ANR: failed to complete
+startup", with the main thread blocked on a mutex. That was a deadlock at
+startup, not a crash.
