@@ -381,3 +381,46 @@ during graph registration.
 The `19 00 00 00` after `buenos_b0`/`santafe_a0` in the DGC0 metadata is a
 string-length prefix (for `main_STAND_ALONE_cluster2`), NOT a chip id — the
 numeric chip family 25/26 lives only in the outer TFLite custom-options wrapper.
+
+## The G4 NPU RE project (xThr45hx / qbnasasn/google-tensor-chips) — what it proves
+
+The ChatGPT-given repo name was fabricated (401/doesn't exist), but the real work is:
+`xThr45hx/G4_DGCO` (HF) + `github.com/qbnasasn/google-tensor-chips`. Reviewed both.
+
+Key facts from their own files:
+- **"16" = the G4 (rio) hardware version.** Their on-device compiler log
+  (`island_L00-00.log`) reads:
+  `PixelG4A17_Compiler — V2 + force HW=16 (v6) for A17+` ;
+  `patched: HwVer load -> mov w0,#16` ; `HW dispatcher will see w0=16`.
+  So 16 is exactly the chip/HW version our firmware demands, confirmed from an
+  independent source. They force it by patching the COMPILER, at compile time.
+- **Their proven method to run a custom model on the Tensor NPU** (G2 doc,
+  `CUSTOM_MODEL_EXECUTION.md`, and the G4 DGC0 artifacts) is always:
+  author a TFLite model -> the on-device `google-edgetpu` driver compiles it
+  (stage-1 + stage-2 -> DGC0) -> it runs. **Source graph in, DGC0 out.**
+- **Nobody retargets a finished foreign-chip DGC0 by patching.** The HW target
+  pervades instruction selection/scheduling; the way to target G4 is to compile
+  from source with HW=16, not to edit another chip's compiled binary. Their G4
+  DGC0 headers are zeroed after the `DGC0` magic (same as ours), i.e. the chip
+  targeting is not a single flippable header byte.
+- Hardware envelope (their measurements): the NPU wins only for compute-bound
+  models that fit on-chip SRAM (~7.7 MB on G2); it shares the LPDDR5 bus. The
+  Pro Zoom denoiser needs ~147 MB scratch + ~865M params — far outside that.
+
+### Consequence for Pro Zoom (triple-confirmed wall)
+1. The G4 TPU firmware rejects the G5 denoiser at registration (chip type 16 vs
+   255) — from the device's own log.
+2. Running a foreign (G5) DGC0 on G4 is not achievable by patching: the only
+   demonstrated route to custom G4 execution is compile-from-TFLite-source, and
+   the HW target is baked through the whole compile (independent RE project).
+3. Recompiling the denoiser for G4 needs its TFLite source graph + weights.
+   Google ships only the AOT-compiled G5 DGC0 on the phone; Pro Res Zoom's model
+   is not published (unlike Gemma, which the G4 community build recompiled from
+   open weights). 865M params of G5 TPU machine code cannot be decompiled back
+   to a graph. No source => nothing to compile for G4.
+
+The chip-type-tag patch remains the only untried experiment, but: its field is
+not locatable from the files in hand (header zeroed; format tooling for G4 is
+not published in the repo), and even a forced registration would feed G5 machine
+code to G4 silicon — not correct inference. It would confirm a dead end, not
+open a path.
