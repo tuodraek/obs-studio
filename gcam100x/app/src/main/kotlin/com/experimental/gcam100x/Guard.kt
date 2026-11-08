@@ -103,7 +103,7 @@ object Guard {
      * null if unavailable. Read through the system context, available before
      * the app's own context exists.
      */
-    private fun lastExit(): Pair<String, Boolean>? = runCatching {
+    fun lastExit(): Pair<String, Boolean>? = runCatching {
         val at = Class.forName("android.app.ActivityThread")
         val thread = at.getMethod("currentActivityThread").invoke(null)
         val ctx = at.getMethod("getSystemContext").invoke(thread) as android.content.Context
@@ -170,6 +170,7 @@ object Guard {
 
     /** Turn Google's path back on (takes effect at the next camera start). */
     fun retry() {
+        Native.retry()
         runCatching { disabledFile.delete(); modelMarker.delete(); shotMarker.delete() }
         consecutiveCrashes = 0; consecutiveNoOutput = 0
         writeStats()

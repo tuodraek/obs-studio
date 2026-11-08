@@ -560,6 +560,8 @@ object ProZoom {
     fun register(ctx: Context) {
         if (appContext != null) return
         appContext = ctx.applicationContext
+        // The camera is open and running: startup with the native part is fine.
+        worker.postDelayed({ Native.startupOk() }, 5_000)
         worker.post { Forensics.report(ctx.applicationContext) { pr, msg -> module.logMessage(pr, TAG, msg) } }
     }
 

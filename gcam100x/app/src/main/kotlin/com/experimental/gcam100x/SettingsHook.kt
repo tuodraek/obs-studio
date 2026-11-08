@@ -147,7 +147,7 @@ class SettingsHook(private val module: MainHook) {
             .setView(ScrollView(ctx).apply { addView(column) })
             .setPositiveButton("Close", null)
             .setNeutralButton("Copy log") { _, _ -> copyLog(ctx, text) }
-        if (!Guard.googleEnabled) b.setNegativeButton("Retry Google Pro Zoom") { _, _ ->
+        if (!Guard.googleEnabled || Native.disabledReason != null) b.setNegativeButton("Retry Google Pro Zoom") { _, _ ->
             Guard.retry()
             Toast.makeText(ctx, "Google Pro Zoom re-enabled: close and reopen the camera", Toast.LENGTH_LONG).show()
         }
