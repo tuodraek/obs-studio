@@ -104,3 +104,58 @@ not contain. Tool: `fbroot.py <file> <dgc0_magic_offset>`.
   *patched* compiler forcing HW=16; that tooling is not in the public repo —
   the referenced `g4-pixel/` folder does not exist there). Prior "x86 vs ARM"
   reasoning was wrong and is retracted.
+
+## Phase 3 — DECISIVE result: on-device test + offline byte-diff (2026-11-09)
+
+Two independent lines of evidence now settle the "does the patched G5 denoiser
+register on G4?" question. This supersedes the Phase-1/2 hypotheses above.
+
+### A. On-device test (disk-swap injection, tested)
+Google Camera keeps the Pro Zoom denoiser on disk (MDD):
+`files/datadownload/shared/public/datadownloadfile_1793924474311`, 938529728 B.
+We backed it up, overwrote its contents in place with a chip-patched copy
+(variant `both`: wrapper `chip_family` 25->16 AND the two `buenos_b0`->`rio_a0`
+identity strings), let Google Camera load and register it through its own
+pipeline, captured the firmware log, then restored the original. Result:
+
+```
+E Darwinn: registration.cc:128 - Expected chip type 16 in executable, got 255.
+E native : RegisterGraphRequest ... error_code=3 ... Target Runtime Version: 5
+E native : Node number 1 (edgetpu-custom-op-2) failed to prepare.
+```
+
+`got 255` is identical to the UNPATCHED G5 denoiser. So patching the wrapper
+`chip_family` field and the `buenos_b0` strings changes nothing the firmware
+reads. The injection path itself works (arbitrary patched bytes reach the real
+registration path); the patch does not. VERDICT: NO.
+
+### B. Offline byte-diff vs a real G4 executable (proven)
+Compared a real G4 (rio) DGC0 (xThr45hx/G4_DGCO, chip 16) against a G5 (buenos,
+chip 25) executable from this package (the encoder, 3721f30e):
+
+```
+G5 encoder  DGD0@4676:  24 00 00 00  10 00 00 00  44 47 44 30 08 00 0c 00 ...
+G4 ref      DGD0@4100:  24 00 00 00  10 00 00 00  44 47 44 30 08 00 0c 00 ...
+```
+
+The container metadata is BYTE-IDENTICAL between a chip-25 and a chip-16
+executable: same DGC0 header, same DGD0 vtable, same value (0x10 = a FlatBuffer
+vtable offset, NOT a chip id) at DGD0-4. The wrapper `chip_family` u32 at DGC0-16
+(25 vs 16) is the only metadata that differs, and part A proved the firmware does
+not read it. Therefore the chip identity the firmware checks lives in the
+**compiled DarWINN program body** (the TPU instruction stream), which is wholly
+chip-specific. There is no metadata field to flip.
+
+### Conclusion (mechanism, not assumption)
+- The chip target is a COMPILE-TIME property of the program body. Confirmed by the
+  G4 toolchain's own build log (`isl0.log`): G4 DGC0s are produced by patching the
+  compiler to force `HW=16` and recompiling from TFLite source — never by editing
+  a compiled binary.
+- Running this denoiser on G4 requires its PRE-compilation TFLite graph, fed to
+  the on-device DarWINN compiler (which already targets G4 — that is how the
+  camera's own rio models and the on-device portrait model compile and run). This
+  package ships only the G5-compiled DGC0; the source is not present and cannot be
+  recovered from the compiled binary (AOT compilation is one-way).
+- No further byte-patch experiment can change this; the absence of a chip field in
+  the container is proven offline.
+Tools: `diskswap_test.sh` (reversible on-device test), `chippatch.py`, `fbroot.py`.
