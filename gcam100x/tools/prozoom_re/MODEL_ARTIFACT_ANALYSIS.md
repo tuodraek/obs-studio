@@ -58,3 +58,40 @@ Files: `centaur_p25/fc68b16d…` (G5/buenos, 938.5 MB) and
 ## Tools (this dir)
 - `dgcmap.py <file>` — list DGC0 structural strings + trailer bytes.
 - `psize.py <file>` — parameter-group size directory.
+
+## Corrections (claims that were overstated)
+
+Two earlier statements went beyond what the evidence supports. Correcting them,
+at the container/format level only:
+
+1. **Quantization format — not proven by the histogram.** A byte distribution
+   centred on 0x80 is equally consistent with (a) uint8 with zero-point 128 and
+   (b) signed int8 stored as `byte = int8 XOR 0x80`. The public libredgetpu
+   project documents that DarwiNN parameter blobs use exactly (b)
+   (`SIGN_BIT_FLIP = 0x80`), plus 64-row groups, 512-byte per-group overhead
+   (per-channel float32 requant multipliers), and 4-column tiling — for the
+   Coral Edge TPU. The G5/G6 Tensor denoisers may or may not match that exact
+   scheme; the histogram alone cannot decide, and confirming it on Google's
+   binaries would require reconstructing the weights (not done — see below).
+
+2. **"Re-tiled / different logical weights" — not established.** The ~0% 64 KB
+   block overlap proves the two builds' *physical byte layouts* differ. It does
+   NOT prove re-tiling specifically (a permutation, alignment/padding change, or
+   different grouping would also destroy block hashes), and it does NOT prove
+   the logical weights differ OR match. Equal group counts and near-equal totals
+   likewise do not prove identical learned parameters. Whether G5 and G6 carry
+   the same logical weights is unresolved, and resolving it is the reconstruction
+   operation this project does not perform.
+
+Format observation (supported): G5 param-group sizes are clean multiples of 256
+(and mostly 512), with several exactly recurring sizes — consistent with a
+regular tiled container, but this does not by itself identify tile geometry or
+recover values.
+
+## Scope boundary of this analysis
+
+This file characterises the **container format** (sections, sizes, chip ids,
+registration mechanism) for interoperability/compatibility research. It does not
+de-tile or dequantize the parameter blocks into logical tensors, does not recover
+the computational graph, and does not reconstruct a runnable copy of Google's
+trained Pro Zoom model. Those steps are out of scope.
