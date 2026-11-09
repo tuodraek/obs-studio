@@ -29,6 +29,8 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 #define TAG "GCam100x-native"
 #define FILES_DIR "/data/user/0/com.google.android.GoogleCamera/files/"
@@ -248,6 +250,8 @@ static void try_install(void) {
            ctx.build_id, (void *)g_base, failed == 0 ? "installed" : "FAILED");
 }
 
+static void install_denoiser_subst(void); // defined below
+
 static void on_library_loaded(const char *name, void *handle) {
     (void)handle;
     if (name && strstr(name, "libgcastartup.so")) try_install();
@@ -256,9 +260,52 @@ static void on_library_loaded(const char *name, void *handle) {
 __attribute__((visibility("default"))) NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
     g_hook = entries ? entries->hook_func : NULL;
     if (g_hook) atomic_fetch_or(&g_state, ST_API);
+    if (g_hook) install_denoiser_subst();
     __android_log_print(ANDROID_LOG_INFO, TAG, "native_init (API version %u)", entries ? entries->version : 0);
     try_install(); // in case it is already loaded
     return on_library_loaded;
+}
+
+// --- Denoiser file substitution (chip-patch interoperability test) -------------
+// When a patched denoiser is staged at PATCHED_DENOISER, replace the camera's
+// read of the original (matched by its exact byte size) with the patched file,
+// so the patched graph goes through the camera's own registration path. Gated:
+// if the staged file is absent at init, these hooks are never installed (zero
+// effect on normal use). Only a file of exactly DENOISER_SIZE is ever swapped.
+#define PATCHED_DENOISER "/data/user/0/com.google.android.GoogleCamera/files/ppz_denoiser.bin"
+#define DENOISER_SIZE 938529728LL
+static atomic_int g_subst_count;
+static int (*orig_openat)(int, const char*, int, mode_t);
+static int (*orig_open)(const char*, int, mode_t);
+static int (*orig_open64)(const char*, int, mode_t);
+static int maybe_swap(int fd) {
+    if (fd < 0) return fd;
+    struct stat st;
+    if (fstat(fd, &st) == 0 && (long long)st.st_size == DENOISER_SIZE) {
+        int pfd = orig_openat ? orig_openat(AT_FDCWD, PATCHED_DENOISER, O_RDONLY, 0)
+                              : open(PATCHED_DENOISER, O_RDONLY);
+        if (pfd >= 0) {
+            gc_log("Denoiser substitution: swapped a %lld-byte file for the patched denoiser (count %d)",
+                   (long long)DENOISER_SIZE, atomic_fetch_add(&g_subst_count,1)+1);
+            close(fd); return pfd;
+        }
+    }
+    return fd;
+}
+static int hooked_openat(int d, const char* p, int f, mode_t m){ return maybe_swap(orig_openat(d,p,f,m)); }
+static int hooked_open  (const char* p, int f, mode_t m){ return maybe_swap(orig_open(p,f,m)); }
+static int hooked_open64(const char* p, int f, mode_t m){ return maybe_swap(orig_open64(p,f,m)); }
+static void install_denoiser_subst(void) {
+    if (access(PATCHED_DENOISER, R_OK) != 0) { gc_log("Denoiser substitution: no staged file, not installed"); return; }
+    void* libc = dlopen("libc.so", RTLD_NOW|RTLD_NOLOAD);
+    int n=0;
+    void* a_openat = libc ? dlsym(libc,"openat") : NULL;
+    void* a_open   = libc ? dlsym(libc,"open")   : NULL;
+    void* a_open64 = libc ? dlsym(libc,"open64") : NULL;
+    if (a_openat && g_hook(a_openat,(void*)hooked_openat,(void**)&orig_openat)==0) n++;
+    if (a_open   && g_hook(a_open,  (void*)hooked_open,  (void**)&orig_open)==0)   n++;
+    if (a_open64 && g_hook(a_open64,(void*)hooked_open64,(void**)&orig_open64)==0) n++;
+    gc_log("Denoiser substitution: staged file present; installed %d/3 open hooks (swaps only %lld-byte files)", n, DENOISER_SIZE);
 }
 
 // --- Java side ----------------------------------------------------------------
