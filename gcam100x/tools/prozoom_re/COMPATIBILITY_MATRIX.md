@@ -60,3 +60,29 @@ fail. Testing them in isolation would require preventing the denoiser crash firs
   structure, runtime acceptance) is listed as an open item for on-device work.
 - Reconstructing Google's trained weights/graph into a runnable model (out of
   scope for this assistant).
+
+## Phase 1 result — the "255" is a container-format-version gap, not a flippable chip byte
+
+The DGC0 is a FlatBuffer (`[u32 root_uoffset]["DGC0"][data]`; confirmed by the
+qbnasasn RE notes and by parsing). Its root table has 8 fields. Parsing the root
+tables (`fbroot.py`) across known-good and rejected executables:
+
+| field | G4 island | G4 embgemma | G4 bonsai | G5 denoiser (buenos) | G6 denoiser (santafe) |
+|---|---|---|---|---|---|
+| f[3] | 1 | 1 | 1 | **6** | **6** |
+| f[7] | 20 | 20 | 20 | **24** | **24** |
+
+f[3] is a **container-format version**: identical (1) across three independent
+G4-native executables that register fine, identical (6) across the G5 AND G6
+denoisers (two *different* chips) — so it tracks the compiler/format generation,
+not the chip (a chip id would differ G5 vs G6). f[7] (a header/struct size) moved
+20→24 with that version bump.
+
+Implication: the A17 firmware (paired with the G4/rio TPU, format v1) parses the
+v6 container and does not find a chip type it recognises, reporting `255`
+(0xFF = unknown). So "Expected chip type 16, got 255" is best explained as a
+**parse/enumeration fallback caused by a newer container-format version**, not a
+single stored chip-id byte. Relabelling a chip tag cannot make a v6 container
+parse as v1. The only way to obtain a v1/G4 container is to compile *for* G4
+(the xThr45hx on-device method) from a portable source — which this package does
+not contain. Tool: `fbroot.py <file> <dgc0_magic_offset>`.
