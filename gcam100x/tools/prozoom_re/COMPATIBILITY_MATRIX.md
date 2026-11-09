@@ -86,3 +86,21 @@ single stored chip-id byte. Relabelling a chip tag cannot make a v6 container
 parse as v1. The only way to obtain a v1/G4 container is to compile *for* G4
 (the xThr45hx on-device method) from a portable source — which this package does
 not contain. Tool: `fbroot.py <file> <dgc0_magic_offset>`.
+
+## Phase 1/2 correction and honest status (supersedes "decisive" wording above)
+
+- The f[3]=1-vs-6 / f[7]=20-vs-24 / f[1] differences are **evidenced** as a
+  format/generation difference (constant across the G5 and G6 chips, different on
+  three G4 executables). Calling f[3] specifically a "container-format version",
+  and asserting it is *the cause* of the firmware's `255`, is a **hypothesis** —
+  not proven. No firmware code or verified DGC0 schema was available, so the
+  `255` mechanism is **unverified** (only FlatBuffer fields were compared).
+- f[4]/f[5] differ between G5 and G6 (candidate chip-specific fields); which field
+  the firmware reads as "chip type" is unconfirmed without the schema.
+- x86 cross-compile validation (the clean test: compile one small model for G4 vs
+  G5 and diff the fields) could NOT be run here: the LiteRT Google Tensor compiler
+  plugin artifact is unavailable (CDN 404 across versions; install blocked), and
+  no published compiler targets G4 (the one working G4 build used a privately
+  *patched* compiler forcing HW=16; that tooling is not in the public repo —
+  the referenced `g4-pixel/` folder does not exist there). Prior "x86 vs ARM"
+  reasoning was wrong and is retracted.
