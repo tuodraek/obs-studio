@@ -30,10 +30,35 @@ err(){ echo "[!] $*"; }
 
 [ "$(id -u)" = "0" ] || { err "Run this as root (type: su   then re-run)."; exit 1; }
 
+# --- KernelSU / isolated-namespace handling -------------------------------------
+# On KernelSU the root shell often runs in its own mount namespace where
+# /data/data shows almost nothing. The camera and system_server live in the real
+# namespace. If we can't see the camera dir, re-exec this script inside
+# system_server's mount namespace (still uid 0) so /data/data is the real one.
+if [ ! -d "/data/data/$PKG" ] && [ -z "${PPZ_NSENTERED:-}" ]; then
+  SSPID=$(pidof system_server 2>/dev/null | tr ' ' '\n' | head -1)
+  [ -n "$SSPID" ] || SSPID=$(pidof zygote64 2>/dev/null | tr ' ' '\n' | head -1)
+  [ -n "$SSPID" ] || SSPID=$(pidof zygote 2>/dev/null | tr ' ' '\n' | head -1)
+  NS=""
+  if command -v nsenter >/dev/null 2>&1; then NS="nsenter";
+  elif [ -x /system/bin/nsenter ]; then NS="/system/bin/nsenter";
+  elif command -v toybox >/dev/null 2>&1 && toybox nsenter --help >/dev/null 2>&1; then NS="toybox nsenter"; fi
+  if [ -n "$SSPID" ] && [ -n "$NS" ]; then
+    say "Camera dir not visible here (KernelSU isolated namespace)."
+    say "Re-entering system_server's namespace (pid $SSPID) to reach the real /data..."
+    export PPZ_NSENTERED=1
+    exec $NS -t "$SSPID" -m -- /system/bin/sh "$0" "$@"
+  else
+    err "Cannot see /data/data/$PKG and nsenter/system_server unavailable."
+    err "SSPID='$SSPID' nsenter='$NS'. Paste this line so I can adjust."
+    exit 1
+  fi
+fi
+
 # --- locate the camera data dir -------------------------------------------------
-CAMDIR=/data/user/0/$PKG
-[ -d "$CAMDIR" ] || CAMDIR=/data/data/$PKG
-[ -d "$CAMDIR" ] || { err "Camera data dir not found ($PKG not installed?)."; exit 1; }
+CAMDIR=/data/data/$PKG
+[ -d "$CAMDIR" ] || CAMDIR=/data/user/0/$PKG
+[ -d "$CAMDIR" ] || { err "Camera data dir not found ($PKG not installed?) even in real namespace."; exit 1; }
 FILES="$CAMDIR/files"
 mkdir -p "$FILES" 2>/dev/null
 DST="$FILES/ppz_denoiser.bin"
@@ -57,8 +82,12 @@ cp -f "$SRC" "$DST" || { err "copy to $DST failed"; exit 1; }
 chown "$UID_CAM:$GID_CAM" "$DST" 2>/dev/null
 chmod 0640 "$DST" 2>/dev/null
 restorecon "$DST" 2>/dev/null
-# make sure the files dir itself is traversable by the app
-chown "$UID_CAM:$GID_CAM" "$FILES" 2>/dev/null; restorecon "$FILES" 2>/dev/null
+# Force the file's SELinux context to match the camera's files/ dir exactly
+# (per-app app_data_file categories), so the camera process can read it.
+DIRCTX=$(stat -c %C "$FILES" 2>/dev/null)
+if [ -n "$DIRCTX" ] && [ "$DIRCTX" != "?" ]; then
+  chcon "$DIRCTX" "$DST" 2>/dev/null && say "Context set to $DIRCTX"
+fi
 say "Staged -> $DST"
 ls -lZ "$DST" 2>/dev/null || ls -l "$DST"
 
