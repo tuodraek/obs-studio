@@ -70,7 +70,7 @@ class MainActivity : Activity() {
                     if (alive) seen = true
                     if (seen && !alive) { Thread.sleep(500); if (!log.readText().contains("END $name ")) log.appendText("PROCESS DIED during $name (native crash or killed by the system)\n"); break }
                 }
-                if (alive(":$name")) { log.appendText("TIMEOUT $name after 8 min\n"); stopService(Intent(this, cls)) }
+                if (!log.readText().contains("END $name ") && alive(":$name")) { log.appendText("TIMEOUT $name after 8 min\n"); stopService(Intent(this, cls)) }
                 Thread.sleep(3000)
             }
             log.appendText("\nALL DONE\n"); show()

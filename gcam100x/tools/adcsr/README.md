@@ -23,12 +23,26 @@ huggingface.co/Guaishou74851/AdcSR — `net_params_200.pkl`
 - Cost per tile: ~495 GMACs conv/linear (+~55 attention). UNet 185 GMACs / 444 M params;
   VAE decoder 310 GMACs / 12 M params -> the decoder is 62% of the compute.
 
-## Phase 3 gate — measure on the Pixel 9 Pro XL
-`bench_g4.sh` runs Google's LiteRT `benchmark_model` on the exact graph with
-placeholder weights (`export_bench.py`; identical op list and tensor sizes, so
-latency/memory are representative; the output is not an image). It reports GPU
-(OpenCL FP16) init time, per-tile latency over repeated runs, peak memory, and a
-CPU reference. Nothing in the camera or module is touched.
+## Phase 3 — measured on the Pixel 9 Pro XL (Tensor G4, Android 17), 2026-11-13
+One 128x128 -> 512x512 tile, exact AdcSR graph (placeholder weights), LiteRT 2.3.2,
+inside an app process (`gcam100x/bench`):
+
+| Path | Result |
+|---|---|
+| GPU, ML Drift OpenCL (Mali-G715) | **1565 ms/tile** (1561-1568 over 7 runs), all 3173 nodes on GPU, first init 68 s, peak RSS 4.7 GB |
+| NPU (Tensor TPU) | not available to a normal app: the Google Tensor compiler plugin needs `/vendor/lib64/libedgetpu_litert.so`, outside the app linker namespace |
+| CPU, XNNPACK | 7.9 s/tile with the Feb-2025 benchmark tool; 134 s/tile through LiteRT 2.3.2 CompiledModel on the FP16 file |
+
+A 120x photo (384x510 -> 1536x2040) needs >= 12 tiles: ~19 s without overlap, ~30 s
+with overlap. **AdcSR as released misses the <= 5 s target on the G4 GPU by 4-6x**, and
+its memory footprint is too high for use next to the camera. Even a free decoder
+would leave ~0.6 s/tile for the UNet (37% of the MACs), i.e. ~7 s per photo.
+
+Earlier attempts that produced no accelerator numbers: Google's Feb-2025
+`benchmark_model` (old GPU delegate took 691/3173 nodes; Mali driver not loadable from
+the Termux folder) and a bare executable under KernelSU (GPU accelerator would not
+register). Use the app.
 
 Scripts: `adcsr_build.py` (model), `export_onnx.py`, `export_tflite.py`, `quant.py fp16`,
-`export_bench.py`, `macs2.py`, `tfl_ops.py`.
+`export_bench.py` (placeholder-weight benchmark graph), `macs2.py`, `tfl_ops.py`,
+`bench/lrbench.c` (benchmark core, also built into the app).
