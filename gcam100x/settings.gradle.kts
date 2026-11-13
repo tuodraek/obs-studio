@@ -15,3 +15,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "GCam100x"
 include(":app")
+include(":bench")
