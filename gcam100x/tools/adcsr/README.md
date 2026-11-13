@@ -46,3 +46,21 @@ register). Use the app.
 Scripts: `adcsr_build.py` (model), `export_onnx.py`, `export_tflite.py`, `quant.py fp16`,
 `export_bench.py` (placeholder-weight benchmark graph), `macs2.py`, `tfl_ops.py`,
 `bench/lrbench.c` (benchmark core, also built into the app).
+
+## Engine and enhancer app (GPU path, in progress)
+- `gcam100x/enhancer`: the engine as its own app/process. `jni/engine.c` tiles a photo
+  (128-px tiles, 16-px overlap, feathered blend), applies AdcSR's per-tile mean/std
+  normalisation and a low-frequency colour lock to the input, and caches the compiled
+  GPU programs. Verified on x86 with the real weights (4-tile image, no seams).
+  `EnhanceService` (":engine" process) reduces a photo to <= 512 px on the long side,
+  restores 4x, and saves `Pictures/GCam100x/<name>_AI.jpg` (EXIF marks it AI-enhanced);
+  the source is never modified. Not yet verified on the phone.
+
+## Quantization for the TPU
+- `quant_int8.py <src> <dst> <recipe>`: static quantization with ai-edge-quantizer 0.10.1.
+  Two local fixes were needed: skip `_ensure_model_qsv_sufficient` (needs 21 GB) and a bug
+  in `uniform_quantize_tensor.py` for weights > 32 MiB (scales not reshaped with the data).
+- W8A8 (`static_wi8_ai8`): output is garbage (13.5 dB vs float).
+- **W8A16 (`static_wi8_ai16`, the paper's setting): 33.1 dB vs float, visually equivalent,
+  463 MB.** Whether the G4 TPU accepts 16-bit activations is what `tpu_probe.sh` tests
+  (NNAPI google-edgetpu, and the LiteRT Google Tensor plugin run as root).
