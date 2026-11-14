@@ -11,12 +11,13 @@ android {
         applicationId = "com.experimental.adcsrbench"
         minSdk = 33
         targetSdk = 37
-        versionCode = 2
-        versionName = "0.2"
+        versionCode = 3
+        versionName = "0.3"
         ndk { abiFilters += "arm64-v8a" }
     }
     // The LiteRT accelerator libraries are opened by path at run time.
     packaging { jniLibs { useLegacyPackaging = true } }
+    androidResources { noCompress += "tflite" }
     buildTypes { release { isMinifyEnabled = false } }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21

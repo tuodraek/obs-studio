@@ -84,3 +84,11 @@ Scripts: `adcsr_build.py` (model), `export_onnx.py`, `export_tflite.py`, `quant.
 - Decoder alone on the GPU: 945 ms/tile (so the UNet half is ~620 ms).
 - `tpu_dec.sh`: compiles and runs the decoder (W8A16 and float) on the TPU as root and reads
   `/sys/devices/platform/1a000000.rio/tpu_usage` before/after. Result pending.
+- 2026-11-14, with `tpu_allow.sh` (`vendor.edgetpu.service.allow_unlisted_app=true` + service
+  restart): the allowlist refusal is gone for a normal app. W8A16 decoder: "Compile failed,
+  error code 2: UNKNOWN: Compute op cost failed". Float decoder: compile started, outcome not
+  observed (bench 0.2 mistook old END markers in an appended log for the new run's).
+- Decoder quantization quality vs the float decoder on a real tile: W8A16 39.0 dB, W8A8 21.4 dB.
+- Bench 0.3 ships tiny single-layer models (`make_probes.py`: conv, GroupNorm, SiLU,
+  upsample+conv, the decoder's residual block, and a ReLU block without GroupNorm; each in
+  float / W8A16 / W8A8) plus the W8A8 decoder, runs each on the TPU and writes a summary.
