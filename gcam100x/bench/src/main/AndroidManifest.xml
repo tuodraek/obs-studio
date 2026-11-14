@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <application
+        android:icon="@android:drawable/ic_menu_gallery"
+        android:label="AdcSR bench"
+        android:extractNativeLibs="true"
+        android:largeHeap="true">
+        <!-- The GPU accelerator uses the vendor OpenCL driver. -->
+        <uses-native-library android:name="libOpenCL.so" android:required="false" />
+        <uses-native-library android:name="libOpenCL-pixel.so" android:required="false" />
+        <uses-native-library android:name="libedgetpu_client.google.so" android:required="false" />
+        <uses-native-library android:name="libedgetpu_util.so" android:required="false" />
+        <uses-native-library android:name="libedgetpu_litert.so" android:required="false" />
+        <uses-native-library android:name="libedgetpu_tachyon.google.so" android:required="false" />
+        <activity android:name=".MainActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <!-- One process per test: a native crash in one cannot lose the log or stop the next. -->
+        <service android:name=".GpuTest" android:process=":gpu" android:exported="false" />
+        <service android:name=".NpuTest" android:process=":npu" android:exported="false" />
+        <service android:name=".CpuTest" android:process=":cpu" android:exported="false" />
+    </application>
+</manifest>

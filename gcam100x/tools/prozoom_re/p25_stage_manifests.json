@@ -1,0 +1,176 @@
+[
+  {
+    "file": "3721f30e4f91d766ece23a4baddc4d5a2879a3cf",
+    "size": 21915072,
+    "tflite": true,
+    "dgc0_off": 580,
+    "chip_family_u32": 25,
+    "chip_strings": [
+      "buenos_b0"
+    ],
+    "io_tensors": [
+      "StatefulPartitionedCall:0",
+      "serving_default",
+      "serving_default_image_inputs:0"
+    ],
+    "param_groups": {
+      "count": 1,
+      "total_bytes": 10430976,
+      "sizes": {
+        "0": 10430976
+      }
+    },
+    "inst_groups": {
+      "count": 0,
+      "total_bytes": 0
+    },
+    "scratch": [
+      "dive_scratch_303104",
+      "scratch_268435456"
+    ]
+  },
+  {
+    "file": "fc68b16d5af9b02f1ac69264e69783b4bf686544",
+    "size": 938529728,
+    "tflite": true,
+    "dgc0_off": 708,
+    "chip_family_u32": 25,
+    "chip_strings": [
+      "buenos_b0"
+    ],
+    "io_tensors": [
+      "StatefulPartitionedCall:0",
+      "serving_default",
+      "serving_default_encoder_hidden_states:0",
+      "serving_default_sample:0",
+      "serving_default_timesteps:0"
+    ],
+    "param_groups": {
+      "count": 33,
+      "total_bytes": 867251552,
+      "sizes": {
+        "40": 1473312,
+        "39": 207360,
+        "38": 4838400,
+        "37": 207360,
+        "36": 4838400,
+        "35": 207360,
+        "34": 13868800,
+        "33": 824320,
+        "32": 17253120,
+        "31": 824320,
+        "30": 19302400,
+        "29": 824320,
+        "28": 55385600,
+        "27": 3287040,
+        "26": 68912640,
+        "25": 3287040,
+        "24": 77107200,
+        "23": 3287040,
+        "22": 263992320,
+        "20": 3287040,
+        "18": 132853760,
+        "17": 3287040,
+        "16": 59079680,
+        "14": 3287040,
+        "12": 38978560,
+        "11": 824320,
+        "10": 14794240,
+        "8": 824320,
+        "6": 9761280,
+        "5": 207360,
+        "4": 3710720,
+        "2": 207360,
+        "0": 56220480
+      }
+    },
+    "inst_groups": {
+      "count": 1,
+      "total_bytes": 2834433
+    },
+    "scratch": [
+      "scratch_146800640",
+      "dive_scratch_147419136"
+    ]
+  },
+  {
+    "file": "a4f6287518d2ae8fccd0c482672c097ae18a4b96",
+    "size": 45880000,
+    "tflite": true,
+    "dgc0_off": 580,
+    "chip_family_u32": 25,
+    "chip_strings": [
+      "buenos_b0"
+    ],
+    "io_tensors": [
+      "StatefulPartitionedCall:0",
+      "serving_default",
+      "serving_default_latents:0"
+    ],
+    "param_groups": {
+      "count": 1,
+      "total_bytes": 19886144,
+      "sizes": {
+        "0": 19886144
+      }
+    },
+    "inst_groups": {
+      "count": 0,
+      "total_bytes": 0
+    },
+    "scratch": [
+      "dive_scratch_413696",
+      "scratch_335544320"
+    ]
+  },
+  {
+    "file": "df87d79cdd3dca88ecd8b566c469ca3fbaa09546",
+    "size": 2110272,
+    "tflite": true,
+    "dgc0_off": 580,
+    "chip_family_u32": 25,
+    "chip_strings": [
+      "buenos_b0"
+    ],
+    "io_tensors": [
+      "StatefulPartitionedCall:0",
+      "serving_default",
+      "serving_default_source:0"
+    ],
+    "param_groups": {
+      "count": 1,
+      "total_bytes": 1873312,
+      "sizes": {
+        "0": 1873312
+      }
+    },
+    "inst_groups": {
+      "count": 0,
+      "total_bytes": 0
+    },
+    "scratch": [
+      "dive_scratch_217088"
+    ]
+  },
+  {
+    "file": "31d5348247af6a4e90d067c61ee1022b8a229b84",
+    "size": 9987776,
+    "tflite": true,
+    "dgc0_off": 900,
+    "chip_family_u32": 25,
+    "chip_strings": [],
+    "io_tensors": [
+      "serving_default"
+    ],
+    "param_groups": {
+      "count": 0,
+      "total_bytes": 0,
+      "sizes": {}
+    },
+    "inst_groups": {
+      "count": 0,
+      "total_bytes": 0
+    },
+    "scratch": []
+  }
+]

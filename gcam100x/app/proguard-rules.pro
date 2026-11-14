@@ -1,0 +1,4 @@
+-keep class com.experimental.gcam100x.MainHook { *; }
+-keep class io.github.libxposed.** { *; }
+-keep interface io.github.libxposed.** { *; }
+-keep class com.experimental.gcam100x.Native { native <methods>; *; }
