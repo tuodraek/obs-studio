@@ -95,6 +95,9 @@ object Guard {
                 disabledReason = disabledFile.readText()
             }
         }.onFailure { log("Guard: state unavailable: $it") }
+        // 7.0: always off. Normal HDR+ capture + exact crop, then the AI enhancer.
+        googleEnabled = false
+        disabledReason = "retired in 7.0: Google's model is compiled for the Tensor G5 only; the GCam100x Enhancer (AdcSR) replaces it"
         log("Guard: Google's Pro Zoom path ${if (googleEnabled) "on" else "off ($disabledReason)"}; " + summary())
     }
 

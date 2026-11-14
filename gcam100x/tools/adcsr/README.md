@@ -64,3 +64,23 @@ Scripts: `adcsr_build.py` (model), `export_onnx.py`, `export_tflite.py`, `quant.
 - **W8A16 (`static_wi8_ai16`, the paper's setting): 33.1 dB vs float, visually equivalent,
   463 MB.** Whether the G4 TPU accepts 16-bit activations is what `tpu_probe.sh` tests
   (NNAPI google-edgetpu, and the LiteRT Google Tensor plugin run as root).
+
+## 7.0: camera integration (GPU path, built, not yet run on the phone)
+- Module 7.0.0: Google's G5-only model path is retired (never loaded, never run). Every photo
+  above 30x is cropped as before, and a copy of the crop is dropped into
+  `Android/media/com.google.android.GoogleCamera/gcam100x/` (Google Camera may write there
+  without any permission; a direct cross-app start is blocked by package visibility).
+- Enhancer 1.0: a small foreground service watches that folder, restores each photo with
+  AdcSR on the GPU (1536x2040 crop -> 368x488 input, 12 tiles, 8-px overlap -> resized back to
+  the crop's size) and saves `DCIM/Camera/<name>_AI.jpg` with the source's EXIF dates and an
+  AI-generated note. Expected ~19 s of model time per photo from the measured 1565 ms/tile.
+
+## TPU status (2026-11-14)
+- Nothing has executed on the TPU yet.
+- Root, bare executable: the Google Tensor plugin selects every op (quantized and float) and
+  starts compiling; the whole 456 M-parameter model was still compiling after 15 min.
+- Normal app: libraries load, compile starts, then "Compile failed, error code 16: Current
+  application should not be allowed to access EdgeTPU" (EdgeTPU app allowlist).
+- Decoder alone on the GPU: 945 ms/tile (so the UNet half is ~620 ms).
+- `tpu_dec.sh`: compiles and runs the decoder (W8A16 and float) on the TPU as root and reads
+  `/sys/devices/platform/1a000000.rio/tpu_usage` before/after. Result pending.

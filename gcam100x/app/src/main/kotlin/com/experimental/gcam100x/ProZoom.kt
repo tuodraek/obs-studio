@@ -472,7 +472,31 @@ object ProZoom {
             } finally {
                 target.close()
             }
+            if (result !== bytes) requestEnhance(result, cr, uri, shot)
         }
+    }
+
+    /**
+     * Hands the cropped Pro Zoom photo to the GCam100x Enhancer app: a copy of the JPEG is
+     * dropped into Google Camera's own shared media folder, which the enhancer watches.
+     * The camera never waits for it and is unaffected if the enhancer is missing or fails.
+     */
+    private fun requestEnhance(jpeg: ByteArray, cr: android.content.ContentResolver, uri: Uri, shot: Shot) {
+        if (shot.zoom <= 30f) return
+        val ctx = appContext ?: return
+        Thread {
+            runCatching {
+                val name = runCatching {
+                    cr.query(uri, arrayOf(android.provider.MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)?.use { if (it.moveToFirst()) it.getString(0) else null }
+                }.getOrNull()?.substringBeforeLast('.')?.replace(Regex("[^A-Za-z0-9_.~-]"), "_") ?: "PXL_${System.currentTimeMillis()}"
+                @Suppress("DEPRECATION")
+                val dir = java.io.File(ctx.externalMediaDirs.firstOrNull() ?: return@runCatching, "gcam100x").apply { mkdirs() }
+                val tmp = java.io.File(dir, "$name.part")
+                tmp.writeBytes(jpeg)
+                val ok = tmp.renameTo(java.io.File(dir, "$name.jpg"))
+                log("ProZoom: shot #${shot.id}: handed to the AI enhancer (${jpeg.size / 1024} KB, $dir/$name.jpg, ok=$ok)")
+            }.onFailure { warn("ProZoom: could not hand the photo to the enhancer: $it") }
+        }.start()
     }
 
     // --- Rendering -------------------------------------------------------

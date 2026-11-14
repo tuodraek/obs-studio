@@ -12,9 +12,9 @@ class MainHook : XposedModule() {
 
     override fun onModuleLoaded(param: XposedModuleInterface.ModuleLoadedParam) {
         logMessage(Log.INFO, TAG, "Module loaded in process ${param.processName}")
-        // As early as possible: the native crash guard must be in place before
-        // Google Camera loads libgcastartup.so.
-        Native.load(runCatching { moduleApplicationInfo.sourceDir }.getOrNull()) { pr, msg -> logMessage(pr, TAG, msg) }
+        // 7.0: Google's G5-only Pro Zoom model is retired (it cannot run on the G4), so the
+        // native crash guard for it is no longer loaded. Photos above 30x are handed to the
+        // GCam100x Enhancer app (AdcSR) instead; see ProZoom.requestEnhance.
     }
 
     override fun onPackageLoaded(param: XposedModuleInterface.PackageLoadedParam) {

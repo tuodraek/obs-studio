@@ -31,9 +31,14 @@ class MainActivity : Activity() {
             addView(pick); addView(clear); addView(ScrollView(this@MainActivity).apply { addView(text) })
         })
         if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
+        startWatcher()
     }
-    override fun onResume() { super.onResume(); h.post(tick) }
+    override fun onResume() { super.onResume(); startWatcher(); h.post(tick) }
     override fun onPause() { super.onPause(); h.removeCallbacks(tick) }
+
+    private fun startWatcher() {
+        if (Environment.isExternalStorageManager()) runCatching { startForegroundService(Intent(this, EnhanceService::class.java).setAction(EnhanceService.ACTION_WATCH)) }
+    }
 
     private fun pick() {
         if (!Environment.isExternalStorageManager()) {
@@ -53,9 +58,9 @@ class MainActivity : Activity() {
 
     private fun show() {
         val head = when {
-            !Environment.isExternalStorageManager() -> "Tap the first button and allow \"All files access\" (to read the model and save results)."
+            !Environment.isExternalStorageManager() -> "Tap the first button and allow \"All files access\" (to read the model and save results), then come back here."
             !EnhanceService.MODEL.exists() -> "Model missing. Put adcsr_128_fp16.tflite in Download:\n${EnhanceService.MODEL}"
-            else -> "Ready. Results: ${EnhanceService.OUT_DIR}\nLog: ${EnhanceService.LOG}"
+            else -> "Ready. Photos you take above 30x in Google Camera are enhanced automatically;\nthe AI version appears in DCIM/Camera as <name>_AI.jpg about half a minute later.\nLog: ${EnhanceService.LOG}"
         }
         val log = runCatching { EnhanceService.LOG.readText().takeLast(6000) }.getOrDefault("")
         text.text = "$head\n\n$log"

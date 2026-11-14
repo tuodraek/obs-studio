@@ -16,7 +16,7 @@
 
 #define T 128          // model input tile
 #define S 4            // scale
-#define OV 16          // tile overlap (input pixels)
+#define OV 8           // tile overlap (input pixels)
 
 struct Engine {
     LiteRtEnvironment env; LiteRtModel model; LiteRtOptions opts; LiteRtCompiledModel cm;

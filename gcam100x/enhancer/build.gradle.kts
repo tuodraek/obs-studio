@@ -11,8 +11,8 @@ android {
         applicationId = "com.experimental.gcam100x.enhancer"
         minSdk = 33
         targetSdk = 37
-        versionCode = 2
-        versionName = "0.2"
+        versionCode = 10
+        versionName = "1.0"
         ndk { abiFilters += "arm64-v8a" }
     }
     // The LiteRT accelerator libraries are opened by path at run time.
