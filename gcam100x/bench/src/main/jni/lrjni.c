@@ -38,20 +38,21 @@ static void opencl_probe(void) {
 }
 
 JNIEXPORT jint JNICALL Java_com_experimental_adcsrbench_Native_run(JNIEnv *env, jclass c, jstring jmodel, jstring jacc,
-                                                                   jint runs, jstring jlibdir, jstring jlog) {
+                                                                   jint runs, jstring jlibdir, jstring jlog, jstring jcache) {
     (void)c;
     const char *model = (*env)->GetStringUTFChars(env, jmodel, 0), *acc = (*env)->GetStringUTFChars(env, jacc, 0);
     const char *libdir = (*env)->GetStringUTFChars(env, jlibdir, 0), *log = (*env)->GetStringUTFChars(env, jlog, 0);
+    const char *cache = jcache ? (*env)->GetStringUTFChars(env, jcache, 0) : "";
     freopen(log, "a", stdout); freopen(log, "a", stderr);
     setvbuf(stdout, NULL, _IONBF, 0); setvbuf(stderr, NULL, _IONBF, 0);
     if (!strcmp(acc, "gpu")) { opencl_probe(); try_open(libdir, "libLiteRtClGlAccelerator.so"); }
     if (!strcmp(acc, "npu")) {
         try_open(libdir, "libLiteRtDispatch_GoogleTensor.so"); try_open(libdir, "libLiteRtCompilerPlugin_google_tensor.so");
-        try_open(NULL, "libedgetpu_client.google.so"); try_open(NULL, "libedgetpu_util.so");
+        try_open(NULL, "libedgetpu_client.google.so"); try_open(NULL, "libedgetpu_util.so"); try_open(NULL, "libedgetpu_litert.so");
     }
     char r[16]; snprintf(r, sizeof r, "%d", (int)runs);
-    char *argv[] = {"lrbench", (char *)model, (char *)acc, r, (char *)libdir, NULL};
-    int rc = lrbench_main(5, argv);
+    char *argv[] = {"lrbench", (char *)model, (char *)acc, r, (char *)libdir, (char *)cache, NULL};
+    int rc = lrbench_main(6, argv);
     fflush(stdout); fflush(stderr);
     return rc;
 }

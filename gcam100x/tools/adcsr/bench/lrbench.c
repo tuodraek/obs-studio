@@ -1,5 +1,5 @@
 // lrbench: minimal LiteRT (CompiledModel API) benchmark for the AdcSR engine.
-// Usage: lrbench <model.tflite> <cpu|gpu|npu> [runs=6] [libdir=.]
+// Usage: lrbench <model.tflite> <cpu|gpu|npu> [runs=6] [libdir=.] [compiler_cache_dir]
 // Prints init time, per-run latency, whether the model is fully accelerated,
 // and the process peak memory. Uses the same runtime libraries the app will
 // bundle (libLiteRt.so + accelerator libraries from Google's Maven).
@@ -32,11 +32,13 @@ int main(int argc, char **argv) {
     const char *libdir = argc > 4 ? argv[4] : ".";
     setvbuf(stdout, NULL, _IONBF, 0);
 
-    LiteRtEnvOption eo[3];
+    const char *cache = argc > 5 ? argv[5] : NULL;
+    LiteRtEnvOption eo[4]; int neo = 3;
     eo[0].tag = kLiteRtEnvOptionTagRuntimeLibraryDir;        eo[0].value.type = kLiteRtAnyTypeString; eo[0].value.str_value = libdir;
     eo[1].tag = kLiteRtEnvOptionTagDispatchLibraryDir;       eo[1].value.type = kLiteRtAnyTypeString; eo[1].value.str_value = libdir;
     eo[2].tag = kLiteRtEnvOptionTagCompilerPluginLibraryDir; eo[2].value.type = kLiteRtAnyTypeString; eo[2].value.str_value = libdir;
-    LiteRtEnvironment env; CHECK(LiteRtCreateEnvironment(3, eo, &env));
+    if (cache && cache[0]) { eo[3].tag = kLiteRtEnvOptionTagCompilerCacheDir; eo[3].value.type = kLiteRtAnyTypeString; eo[3].value.str_value = cache; neo = 4; }
+    LiteRtEnvironment env; CHECK(LiteRtCreateEnvironment(neo, eo, &env));
 
     double t0 = now_ms();
     LiteRtModel model; CHECK(LiteRtCreateModelFromFile(env, path, &model));
